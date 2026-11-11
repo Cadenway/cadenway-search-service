@@ -22,14 +22,14 @@ The structure and workflows below describe the bootstrap target. Check the check
 
 waypoint-search-service owns the search index. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@waypoint/nest-messaging`, internal REST for the API gateway. Local port 3019.
 
-| | |
-| --- | --- |
-| Data | A search index only: it is rebuilt from the other services and is the source of nothing. |
-| API | Search by text and id, filtered by the user's rights. |
-| Emits | nothing |
-| Listens to | `task.*`, `list.*`, `space.*`, `doc.*`, `member.*` |
-| External | Meilisearch, on the VPS. |
-| Phase | Extracted later, when needed |
+|            |                                                                                          |
+| ---------- | ---------------------------------------------------------------------------------------- |
+| Data       | A search index only: it is rebuilt from the other services and is the source of nothing. |
+| API        | Search by text and id, filtered by the user's rights.                                    |
+| Emits      | nothing                                                                                  |
+| Listens to | `task.*`, `list.*`, `space.*`, `doc.*`, `member.*`                                       |
+| External   | Meilisearch, on the VPS.                                                                 |
+| Phase      | Extracted later, when needed                                                             |
 
 Created when database search is no longer enough.
 
@@ -71,21 +71,20 @@ repository and nothing is inherited.
 - The parts shared with the other repositories are duplicated on purpose; a change to them is repeated
   in each repository through its own pull request.
 
-
 ## Commands and quality gates
 
 The scripts below are this repository's contract. While the repository is being bootstrapped,
 create them with these exact names; afterwards, use them and never an ad-hoc equivalent. Run the
 narrowest check that covers the change first, then widen:
 
-| Changed | Minimum check |
-| --- | --- |
-| Domain or use case code | `pnpm test -- <module>`, then `pnpm test:coverage` |
-| Persistence, events, migrations | `pnpm test:integration -- <module>` |
-| Routes | `pnpm test -- <module>/api` and the contract tests |
-| Any source | `pnpm format:check`, `pnpm lint`, `pnpm typecheck` |
-| Build or runtime configuration | `pnpm build`, `docker compose -f compose.dev.yaml config -q` |
-| Docs or agent instructions only | Scoped formatting and link review |
+| Changed                         | Minimum check                                                |
+| ------------------------------- | ------------------------------------------------------------ |
+| Domain or use case code         | `pnpm test -- <module>`, then `pnpm test:coverage`           |
+| Persistence, events, migrations | `pnpm test:integration -- <module>`                          |
+| Routes                          | `pnpm test -- <module>/api` and the contract tests           |
+| Any source                      | `pnpm format:check`, `pnpm lint`, `pnpm typecheck`           |
+| Build or runtime configuration  | `pnpm build`, `docker compose -f compose.dev.yaml config -q` |
+| Docs or agent instructions only | Scoped formatting and link review                            |
 
 Report the commands you actually ran and their results; a check you did not run is reported as not
 run.

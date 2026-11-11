@@ -2,14 +2,14 @@
 
 waypoint-search-service owns the search index. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@waypoint/nest-messaging`, internal REST for the API gateway. Local port 3019.
 
-| | |
-| --- | --- |
-| Data | A search index only: it is rebuilt from the other services and is the source of nothing. |
-| API | Search by text and id, filtered by the user's rights. |
-| Emits | nothing |
-| Listens to | `task.*`, `list.*`, `space.*`, `doc.*`, `member.*` |
-| External | Meilisearch, on the VPS. |
-| Phase | Extracted later, when needed |
+|            |                                                                                          |
+| ---------- | ---------------------------------------------------------------------------------------- |
+| Data       | A search index only: it is rebuilt from the other services and is the source of nothing. |
+| API        | Search by text and id, filtered by the user's rights.                                    |
+| Emits      | nothing                                                                                  |
+| Listens to | `task.*`, `list.*`, `space.*`, `doc.*`, `member.*`                                       |
+| External   | Meilisearch, on the VPS.                                                                 |
+| Phase      | Extracted later, when needed                                                             |
 
 Created when database search is no longer enough.
 
