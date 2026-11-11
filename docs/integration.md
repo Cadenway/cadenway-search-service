@@ -1,0 +1,43 @@
+# Domain and integration
+
+[Documentation index](README.md) · [Repository instructions](../AGENTS.md)
+
+**Status:** This page records the target design from repository instructions and skills. Its behavior has not been verified as implemented in this snapshot.
+
+The tables and rules on this page are **target domain behavior**, not proof of a running service or an approved API. Source: `wp-search-domain` ([Claude](../.claude/skills/wp-search-domain/SKILL.md), [Codex](../.codex/skills/wp-search-domain/SKILL.md)). The linked mockup and guides remain the source for product details; confirm ambiguous values before implementation.
+
+## What this service owns
+
+The search index.
+
+**Data**: A search index only: it is rebuilt from the other services and is the source of nothing.
+
+**API**: Search by text and id, filtered by the user's rights.
+
+**Events emitted**: none.
+
+**Events consumed**: `task.*`, `list.*`, `space.*`, `doc.*`, `member.*`.
+
+**External systems**: Meilisearch, on the VPS.
+
+**Mockup screens**: The Ctrl + K command palette, the sidebar search.
+
+## Rules this service guards
+
+- Results never leak a private space or a task the user cannot open.
+- The index can be rebuilt from scratch at any time.
+
+## Notes
+
+Created when database search is no longer enough.
+
+Everything above comes from the [repositories document](https://claude.ai/artifact/BPinmYxoF3mbK8w9BMB43N) and the
+[integration guide](https://claude.ai/artifact/CpJHVCiFfF9j3KbHQ2S1Et). If the mockup disagrees with this guide, update the guide and its source skill for both assistants.
+
+## Contract and delivery sequence
+
+The `waypoint-api-contracts` repository owns HTTP and event specifications. Consumers use published `@waypoint/contracts` packages and `@waypoint/nest-messaging`; do not redefine payloads or connect to another service's database. Change contracts first, then the producing service, followed by gateways and listeners, and finally the webapp. Planned event names on this page must be checked against the actual published specification before use.
+
+## References
+
+[Interactive mockup](https://claude.ai/artifact/KYRM7AnsYLiBLBLKy8i4HE), [integration guide](https://claude.ai/artifact/CpJHVCiFfF9j3KbHQ2S1Et), and [repositories and packages](https://claude.ai/artifact/BPinmYxoF3mbK8w9BMB43N). Use [AGENTS.md](../AGENTS.md) as the local source for ownership and hard limits.
