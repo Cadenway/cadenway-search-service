@@ -1,6 +1,6 @@
 {
   "name": "cadenway-search-service",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Cadenway search service: search index.",
   "private": true,
   "license": "UNLICENSED",
