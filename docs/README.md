@@ -1,6 +1,6 @@
-# waypoint-search-service documentation
+# cadenway-search-service documentation
 
-Planned role: waypoint-search-service owns the search index. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@waypoint/nest-messaging`, internal REST for the API gateway. Local port 3019.
+Planned role: cadenway-search-service owns the search index. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@cadenway/nest-messaging`, internal REST for the API gateway. Local port 3019.
 
 ## Current status
 

@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "waypoint-search-service",
+      "name": "cadenway-search-service",
       "runtimeExecutable": "pnpm",
       "runtimeArgs": [
         "start:dev"

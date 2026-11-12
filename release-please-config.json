@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "node",
-      "package-name": "waypoint-search-service",
+      "package-name": "cadenway-search-service",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false
     }

@@ -1,7 +1,7 @@
 {
-  "name": "waypoint-search-service",
+  "name": "cadenway-search-service",
   "version": "0.0.0",
-  "description": "Waypoint search service: search index.",
+  "description": "Cadenway search service: search index.",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",
