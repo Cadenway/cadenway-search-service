@@ -30,6 +30,8 @@ The search index.
 
 Created when database search is no longer enough.
 
+Decided: built in this repository from the start. Each source of the index (task, organization, document, storage) re-emits its current state on `rebuild.<consumer>.<entity>` when the index is rebuilt.
+
 Everything above comes from the [repositories document](https://claude.ai/artifact/BPinmYxoF3mbK8w9BMB43N) and the
 [integration guide](https://claude.ai/artifact/CpJHVCiFfF9j3KbHQ2S1Et). When the mockup and this skill disagree, the mockup wins and
 this skill is corrected in the same change.

@@ -17,7 +17,7 @@ cadenway-search-service owns the search index. NestJS, its own PostgreSQL databa
 | Emits      | nothing                                                                                  |
 | Listens to | `task.*`, `list.*`, `space.*`, `doc.*`, `member.*`                                       |
 | External   | Meilisearch, on the VPS.                                                                 |
-| Phase      | Extracted later, when needed                                                             |
+| Phase      | After the first version                                                                  |
 
 Created when database search is no longer enough.
 
