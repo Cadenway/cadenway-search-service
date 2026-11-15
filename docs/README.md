@@ -4,7 +4,7 @@ Planned role: cadenway-search-service owns the search index. NestJS, its own Pos
 
 ## Current status
 
-The NestJS application under `src/` runs on `@cadenway/nest-common`: configuration validated at start-up, JSON logs, OpenTelemetry preloaded, the internal token required on every route but the health probes, and a readiness route that checks its PostgreSQL database. NATS is not connected yet: `@cadenway/nest-messaging` is not published. Meilisearch is not connected yet either. No business code, route, event or migration exists yet; the target architecture in this guide is what they must follow.
+The NestJS application under `src/` runs on `@cadenway/nest-common` and `@cadenway/nest-messaging`: configuration validated at start-up, JSON logs, OpenTelemetry preloaded, the internal token required on every route but the health probes, the NATS connection of the `search` user with the outbox relay, and a readiness route that checks PostgreSQL and NATS. The only migration creates the tables of the service kit (outbox, processed ids, versions, `Idempotency-Key`), owned by the platform module. Meilisearch is not connected yet. No business code, route or event exists yet; the target architecture in this guide is what they must follow.
 
 ## Read the guides
 
