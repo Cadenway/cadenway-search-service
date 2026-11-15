@@ -4,13 +4,16 @@
 
 ## Bootstrap status
 
-The application under `src/` runs on `@cadenway/nest-common`: its configuration is validated at
-start-up, it writes JSON log lines, starts OpenTelemetry before the application, requires the
-internal token on every route but the health probes, and its readiness checks its PostgreSQL
-database. No business code, route, event or migration exists yet; the target architecture in this
-guide is what they must follow. NATS is not connected: `@cadenway/nest-messaging` is not published
-yet, so `NATS_URL`, `NATS_USER` and `NATS_PASSWORD` are set but read by nothing. Meilisearch is
-not connected either: `MEILI_URL` and `MEILI_API_KEY` are set but read by nothing.
+The application under `src/` runs on `@cadenway/nest-common` and `@cadenway/nest-messaging`: its
+configuration is validated when the application is created, a failed start-up is one JSON line on
+the standard error, it writes JSON log lines, starts OpenTelemetry before the application, requires
+the internal token on every route but the health probes, connects to NATS as the `search` user,
+runs the outbox relay (which only purges here: the service emits nothing), and its readiness checks
+PostgreSQL and NATS. The one migration creates the tables of the service kit, owned by the platform
+module (`src/modules/platform/MODULE.md`). No business code, route or handler exists yet:
+`@cadenway/contracts` defines none of the events this service indexes, so nothing is consumed. The
+target architecture in this guide is what they must follow. Meilisearch is not connected yet:
+`MEILI_URL` and `MEILI_API_KEY` are set but read by nothing.
 
 The commands below are the documented workflow. Inspect the repository's actual manifests and files before running them, and report unavailable checks rather than inventing replacements. Run Git, pnpm, build, and test commands with this repository as the working directory, never from the parent workspace.
 
@@ -43,7 +46,8 @@ Requirements: Node.js LTS and pnpm (versions in `package.json`), and Docker.
    ```bash
    pnpm install
    cp .env.example .env                        # once
-   docker compose -f compose.dev.yaml up -d
+   docker compose -f compose.dev.yaml up -d --wait
+   pnpm migration:run                          # as search_migrator; again after a pull that adds one
    pnpm start:dev                              # http://localhost:3019/health/ready
    ```
 
@@ -54,28 +58,42 @@ Requirements: Node.js LTS and pnpm (versions in `package.json`), and Docker.
    When 5432, 4222 or 7700 is taken, start the stack with `DEV_POSTGRES_PORT`, `DEV_NATS_PORT` or
    `DEV_MEILI_PORT` and change the URLs of `.env` to match.
 
-`pnpm start:dev` loads `.env` and starts the process the way the image does, with the
-OpenTelemetry loader and `dist/telemetry.js` before `dist/main.js`; the two commands carry the same
-flags and change together.
+   Its NATS has the authorization of the broker of cadenway-ops (`docs/messaging.md` there): a
+   connection without a user is refused, and the `search` user may publish no event, only the
+   JetStream API of a consumer of `EVENTS`, and subscribe to `_INBOX.search.>` and
+   `rebuild.search.>` only.
+   `nats-streams` runs the stream script of cadenway-ops with the `admin` user: it creates
+   `EVENTS`, `EVENTS_RESTRICTED` and `EVENTS_DLQ` once NATS is healthy, checks them every minute
+   and is healthy while they exist. The service never creates a stream and refuses to start
+   without `EVENTS`. To look at the streams:
+   `docker compose -f compose.dev.yaml exec nats-streams nats stream ls`.
+
+`pnpm start:dev` loads `.env` and starts the process the way the image does:
+`node --max-old-space-size=160 --import @cadenway/nest-common/register --import ./dist/telemetry.js`
+before `dist/main.js`. The register entry point installs the OpenTelemetry module hooks without an
+`ExperimentalWarning`, `telemetry.js` starts the SDK, and the heap cap keeps the old generation at
+about 60 % of the 256M of the container. The two commands carry the same flags and change together.
 
 ## Configuration
 
-Validated at start-up by `src/config/app-config.ts`: a missing or invalid variable stops the
-process with a `ConfigError` that names it. `.env.example` holds a working local value for each;
+Validated at start-up against the schema of `src/config/app-config.ts`, inside `runApplication`: a
+missing or invalid variable stops the process with one JSON line whose `issues` name it, never its
+value. `.env.example` holds a working local value for each;
 [cadenway-ops](https://github.com/Cadenway/cadenway-ops) (`docs/service-environment.md`) says where
 each value comes from on a server.
 
-| Variable                                 | Read by               | Value                                                                                                |
-| ---------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------- |
-| `PORT`                                   | The service           | `3019`                                                                                               |
-| `NODE_ENV`, `LOG_LEVEL`, `LOG_PRETTY`    | The service           | `production`, `info` and `false` when unset                                                          |
-| `DATABASE_URL`                           | The service           | Application role `search_app`                                                                        |
-| `MIGRATION_DATABASE_URL`                 | `src/migrate.ts` only | Migrator role `search_migrator`; required once a migration exists                                    |
-| `INTERNAL_TOKEN_AUDIENCE`                | The service           | `search-service`                                                                                     |
-| `INTERNAL_TOKEN_TRUSTED_ISSUERS`         | The service           | One line of JSON: the public keys of each backend allowed to call it                                 |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`            | `src/telemetry.ts`    | OTLP over HTTP; unset, nothing leaves the process                                                    |
-| `NATS_URL`, `NATS_USER`, `NATS_PASSWORD` | Nothing yet           | Read by `@cadenway/nest-messaging` once it is wired                                                  |
-| `MEILI_URL`, `MEILI_API_KEY`             | Nothing yet           | Meilisearch and its key; the Meilisearch of `compose.dev.yaml` locally, read once the index is wired |
+| Variable                              | Read by               | Value                                                                                                |
+| ------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `PORT`                                | The service           | `3019`                                                                                               |
+| `NODE_ENV`, `LOG_LEVEL`, `LOG_PRETTY` | The service           | `production`, `info` and `false` when unset                                                          |
+| `DATABASE_URL`                        | The service           | Application role `search_app`                                                                        |
+| `MIGRATION_DATABASE_URL`              | `src/migrate.ts` only | Migrator role `search_migrator`; required once a migration exists                                    |
+| `INTERNAL_TOKEN_AUDIENCE`             | The service           | `search-service`                                                                                     |
+| `INTERNAL_TOKEN_TRUSTED_ISSUERS`      | The service           | One line of JSON: the public keys of each backend allowed to call it                                 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`         | `src/telemetry.ts`    | OTLP over HTTP; unset, nothing leaves the process                                                    |
+| `NATS_URL`                            | The service           | `nats://` URL of the broker                                                                          |
+| `NATS_USER`, `NATS_PASSWORD`          | The service           | User `search` and its password; inbox prefix `_INBOX.search`                                         |
+| `MEILI_URL`, `MEILI_API_KEY`          | Nothing yet           | Meilisearch and its key; the Meilisearch of `compose.dev.yaml` locally, read once the index is wired |
 
 ### Calling the service locally
 
@@ -110,17 +128,34 @@ production stay in the secrets of cadenway-ops.
 
 ### Migrations
 
-`pnpm migration:generate` writes the migrations from the `*.schema.ts` files of the modules.
-`pnpm migration:run` builds and runs `dist/migrate.js`, the command the GitOps agent runs in a
-one-off container before it starts a new version; it connects as the migrator role of
-`MIGRATION_DATABASE_URL`. Without a generated migration it does nothing.
+`pnpm migration:generate` writes the migrations from the `*.schema.ts` files of the modules
+(`pnpm migration:generate --name <what_it_does>` names the file). drizzle-kit enables row-level
+security on a table with a policy but never forces it: add
+`ALTER TABLE "<table>" FORCE ROW LEVEL SECURITY;` to the generated file for every new tenant table
+before it is merged, then never edit it again. `pnpm migration:run` builds and runs
+`dist/migrate.js`, the command the GitOps agent runs in a one-off container before it starts a new
+version; it connects as the migrator role of `MIGRATION_DATABASE_URL` and applies what the journal
+does not list yet.
+
+The tables of the service kit reach the migrations through the platform module: the outbox,
+processed-ids and versions tables of `@cadenway/nest-messaging/outbox` and `idempotency_keys` of
+`@cadenway/nest-common/database` are re-exported from
+`src/modules/platform/infrastructure/persistence/`. A kit version that changes one ships a note
+in its changeset: upgrade the package, generate, review the new migration.
 
 ### Integration tests
 
-`pnpm test:integration` needs Docker. `test/service-wiring.int-spec.ts` starts the PostgreSQL of
-`compose.dev.yaml` as a throwaway Compose project on a free port (the data of the dev stack is never
-touched), assembles the application as `main.ts` does and checks the health routes and the internal
-token. It moves to the fixtures of `@cadenway/nest-testing` once that package exports them.
+`pnpm test:integration` needs Docker. `test/service-wiring.int-spec.ts` starts PostgreSQL, NATS
+and `nats-streams` from `compose.dev.yaml` as a throwaway Compose project on free ports (the data
+of the dev stack is never touched), applies the migrations with `src/migrate.ts` as the migrator
+role, and assembles the application as `main.ts` does, as `search_app` and the NATS user
+`search`. It checks the ownership and forced row-level security of the kit tables, that the
+application role reads and writes the rows of its organization only, runs no DDL and cannot touch
+the journal of drizzle-kit (schema `drizzle`), that the relay runs against an empty outbox, that
+the broker enforces the permissions of cadenway-ops, the health routes (readiness 503 while NATS or
+PostgreSQL is down and from the start of a shutdown, back to 200 once NATS returns) and the
+internal token. It moves to the fixtures of `@cadenway/nest-testing` once that
+package exports them.
 
 ## Minimum checks by change
 
