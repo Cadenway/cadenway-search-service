@@ -15,14 +15,12 @@ import type {
   OrganizationContext,
 } from '@cadenway/nest-common';
 import { SystemTransactionRunner, TenantTransactionRunner } from '@cadenway/nest-common/database';
-import { OutboxRelay } from '@cadenway/nest-messaging/outbox';
 import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { MockInstance } from 'vitest';
 
 import { AppModule } from '../src/app.module.js';
 import { appConfigSchema } from '../src/config/app-config.js';
@@ -210,7 +208,6 @@ describe('search-service wiring', () => {
   let app: NestExpressApplication | undefined;
   let signer: InternalTokenSigner;
   let migrator: pg.Pool;
-  let relayPasses: MockInstance<OutboxRelay['publishPending']>;
 
   /**
    * The running application.
@@ -264,8 +261,6 @@ describe('search-service wiring', () => {
       'INTERNAL_TOKEN_TRUSTED_ISSUERS',
       JSON.stringify({ 'api-gateway': [gateway.publicJwk] }),
     );
-    // Every pass of the relay, from the first one, which starts with the application.
-    relayPasses = vi.spyOn(OutboxRelay.prototype, 'publishPending');
 
     @Module({
       imports: [AppModule],
@@ -300,7 +295,6 @@ describe('search-service wiring', () => {
       await app?.close();
       await migrator.end();
     } finally {
-      relayPasses.mockRestore();
       vi.unstubAllEnvs();
       compose('down', '--volumes', '--remove-orphans');
     }
@@ -526,26 +520,34 @@ describe('search-service wiring', () => {
     expect(journal.rows).toEqual([{ applied: 1 }]);
   });
 
-  it('runs the outbox relay from the start, and it stays healthy against an empty outbox', async () => {
-    // One pass a second: three passes span two poll intervals after the first one.
-    await vi.waitFor(
-      () => {
-        expect(
-          relayPasses.mock.settledResults.filter((result) => result.type !== 'incomplete').length,
-        ).toBeGreaterThanOrEqual(3);
-      },
-      { timeout: 10_000, interval: 100 },
+  it('settles a redacted outbox event', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const eventId = '01938f6e-0000-7000-8000-000000000011';
+    // Search cannot publish business events, so use a redacted row that must not be republished.
+    await system.run(({ client }) =>
+      client.query(
+        `insert into outbox_events (id, event_name, subject, stream, payload)
+         values ($1, 'search.wiring-probe.v1', 'evt.search.wiring-probe.v1', 'EVENTS',
+                 jsonb_build_object('id', $1::uuid, '$redacted', true))`,
+        [eventId],
+      ),
     );
-
-    const passes = relayPasses.mock.settledResults.filter((result) => result.type !== 'incomplete');
-    expect(passes).toEqual(
-      passes.map(() => ({
-        type: 'fulfilled',
-        value: { published: 0, failed: 0, interrupted: false },
-      })),
-    );
-    const response = await request(service().getHttpServer()).get('/health/ready');
-    expect(response.status).toBe(200);
+    try {
+      await vi.waitFor(
+        async () => {
+          const sent = await system.run(({ client }) =>
+            client.query('select status from outbox_events where id = $1', [eventId]),
+          );
+          expect(sent.rows).toEqual([{ status: 'sent' }]);
+        },
+        { timeout: 10_000, interval: 100 },
+      );
+      expect((await request(service().getHttpServer()).get('/health/ready')).status).toBe(200);
+    } finally {
+      await system.run(({ client }) =>
+        client.query('delete from outbox_events where id = $1', [eventId]),
+      );
+    }
   });
 
   it('runs against a broker that enforces the permissions of cadenway-ops', () => {
