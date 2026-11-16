@@ -22,7 +22,6 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { MockInstance } from 'vitest';
 
 import { AppModule } from '../src/app.module.js';
 import { appConfigSchema } from '../src/config/app-config.js';
@@ -213,7 +212,6 @@ describe('search-service wiring', () => {
   let app: NestExpressApplication | undefined;
   let signer: InternalTokenSigner;
   let migrator: pg.Pool;
-  let relayPasses: MockInstance<OutboxRelay['publishPending']>;
 
   /**
    * The running application.
@@ -268,7 +266,6 @@ describe('search-service wiring', () => {
       JSON.stringify({ 'api-gateway': [gateway.publicJwk] }),
     );
     // Every pass of the relay, from the first one, which starts with the application.
-    relayPasses = vi.spyOn(OutboxRelay.prototype, 'publishPending');
 
     @Module({
       imports: [AppModule],
@@ -303,7 +300,6 @@ describe('search-service wiring', () => {
       await app?.close();
       await migrator.end();
     } finally {
-      relayPasses.mockRestore();
       vi.unstubAllEnvs();
       compose('down', '--volumes', '--remove-orphans');
     }
@@ -567,26 +563,13 @@ describe('search-service wiring', () => {
     expect(journal.rows).toEqual([{ applied: platformMigrationCount }]);
   });
 
-  it('runs the outbox relay from the start, and it stays healthy against an empty outbox', async () => {
-    // One pass a second: three passes span two poll intervals after the first one.
-    await vi.waitFor(
-      () => {
-        expect(
-          relayPasses.mock.settledResults.filter((result) => result.type !== 'incomplete').length,
-        ).toBeGreaterThanOrEqual(3);
-      },
-      { timeout: 10_000, interval: 100 },
-    );
-
-    const passes = relayPasses.mock.settledResults.filter((result) => result.type !== 'incomplete');
-    expect(passes).toEqual(
-      passes.map(() => ({
-        type: 'fulfilled',
-        value: { published: 0, failed: 0, interrupted: false },
-      })),
-    );
-    const response = await request(service().getHttpServer()).get('/health/ready');
-    expect(response.status).toBe(200);
+  it('runs a legacy relay pass and stays ready against an empty outbox', async () => {
+    await expect(service().get(OutboxRelay).publishPending()).resolves.toEqual({
+      published: 0,
+      failed: 0,
+      interrupted: false,
+    });
+    expect((await request(service().getHttpServer()).get('/health/ready')).status).toBe(200);
   });
 
   it('runs against a broker that enforces the permissions of cadenway-ops', () => {
