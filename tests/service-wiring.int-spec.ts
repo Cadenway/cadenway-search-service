@@ -63,6 +63,9 @@ const platformTables = [
   'processed_events',
 ] as const;
 
+/** Number of applied platform migrations expected by this fixture. */
+const platformMigrationCount = 2;
+
 /**
  * Runs `docker compose` on the throwaway project.
  *
@@ -317,7 +320,7 @@ describe('search-service wiring', () => {
     expect(tables.rows).toEqual(
       platformTables.map((tablename) => ({ tablename, tableowner: 'search_migrator' })),
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: platformMigrationCount }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -326,7 +329,45 @@ describe('search-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: platformMigrationCount }]);
+  });
+
+  it('keeps historic writes compatible and excludes reserved rows from the historic claim', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const eventId = '01938f6e-0000-7000-8000-000000000010';
+
+    await system.run(async ({ client }) => {
+      const { rows } = await client.query(
+        `insert into outbox_events (id, event_name, subject, stream, payload)
+         values ($1, 'platform.lease-probe.v1', 'evt.platform.lease-probe.v1', 'EVENTS', '{}')
+         returning status, lease_token, lease_expires_at`,
+        [eventId],
+      );
+      expect(rows).toEqual([{ status: 'pending', lease_token: null, lease_expires_at: null }]);
+
+      await client.query(
+        `update outbox_events
+            set status = 'leased', lease_token = uuidv7(), lease_expires_at = now() + interval '30s'
+          where id = $1`,
+        [eventId],
+      );
+      const historicClaim = await client.query(
+        "select id from outbox_events where id = $1 and status = 'pending' for update skip locked",
+        [eventId],
+      );
+      expect(historicClaim.rows).toEqual([]);
+      await client.query('delete from outbox_events where id = $1', [eventId]);
+    });
+
+    await expect(
+      system.run(({ client }) =>
+        client.query(
+          `insert into outbox_events (id, event_name, subject, stream, payload, status)
+           values ($1, 'platform.lease-probe.v1', 'evt.platform.lease-probe.v1', 'EVENTS', '{}', 'leased')`,
+          [eventId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'outbox_events_lease_check' });
   });
 
   it('forces row-level security on the tables that carry an organization', async () => {
@@ -523,7 +564,7 @@ describe('search-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: platformMigrationCount }]);
   });
 
   it('runs the outbox relay from the start, and it stays healthy against an empty outbox', async () => {

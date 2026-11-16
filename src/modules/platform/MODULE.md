@@ -32,6 +32,14 @@ Created by `migrations/0000_platform_tables.sql`, owned by the migrator role
 `search_migrator`. The application role `search_app` reads and writes their rows and holds
 no DDL right on them.
 
+The outbox lease expansion adds nullable reservation fields and widens the status check.
+Historic writers can still insert pending rows and historic relays still claim only those rows.
+Before enabling the lease-based relay, the migration command must call the published Service
+Kit's `finishOutboxLeaseMigration` after the Drizzle transaction. That phase builds the partial
+expiry index concurrently and validates the checks. On rollback from the lease-based relay,
+drain it and reclaim expired leases before restoring the historic relay. Keep the expanded
+schema in place.
+
 ## API
 
 None. The `Idempotency-Key` interceptor of `DatabaseModule` (`idempotency: true`) stores the key and
