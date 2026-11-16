@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/Cadenway/cadenway-search-service/compare/v0.2.0...v0.3.0) (2026-11-16)
+
+
+### Features
+
+* wire messaging and the outbox onto nest-common 0.3.0 ([#19](https://github.com/Cadenway/cadenway-search-service/issues/19)) ([553853e](https://github.com/Cadenway/cadenway-search-service/commit/553853e9c572cf049209fac63e50d7a00b1f3ec7))
+
+
+### Bug Fixes
+
+* **deploy:** keep the migrator url out of the running service ([#21](https://github.com/Cadenway/cadenway-search-service/issues/21)) ([a9fddbe](https://github.com/Cadenway/cadenway-search-service/commit/a9fddbe1aed3fa57efce1a1662ef8ac5cef0bddf))
+
 ## [0.2.0](https://github.com/Cadenway/cadenway-search-service/compare/v0.1.0...v0.2.0) (2026-11-15)
 
 
