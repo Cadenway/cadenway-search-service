@@ -3,6 +3,4 @@ description: "Change the Dockerfile, deploy/compose.yaml or environment variable
 argument-hint: "<change>"
 ---
 
-Delegate to the **cw-search-deploy-maintainer** subagent: $ARGUMENTS
-
-The agent carries its own procedure and rules; do not restate them.
+Delegate to subagent **cw-search-deploy-maintainer** without restating its rules or procedure: $ARGUMENTS
