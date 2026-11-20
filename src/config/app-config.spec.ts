@@ -53,6 +53,65 @@ describe('appConfigSchema', () => {
     expect(() => loadConfig(migrationConfigSchema, example)).not.toThrow();
   });
 
+  it('loads the Meilisearch endpoint and API key together', () => {
+    const settings = {
+      MEILI_URL: 'https://search.example.test:7700/meili',
+      MEILI_API_KEY: 'fixture-meili-key',
+    };
+
+    expect(loadConfig(appConfigSchema, { ...complete, ...settings })).toMatchObject(settings);
+  });
+
+  it('treats two empty Meilisearch settings as absent', () => {
+    const config = loadConfig(appConfigSchema, { ...complete, MEILI_URL: '', MEILI_API_KEY: '' });
+
+    expect(config).not.toHaveProperty('MEILI_URL');
+    expect(config).not.toHaveProperty('MEILI_API_KEY');
+  });
+
+  it('names the missing Meilisearch variable when only one is configured', () => {
+    expect(() =>
+      loadConfig(appConfigSchema, { ...complete, MEILI_URL: 'http://meilisearch:7700' }),
+    ).toThrow(/MEILI_API_KEY: required, not set/u);
+    expect(() =>
+      loadConfig(appConfigSchema, { ...complete, MEILI_API_KEY: 'fixture-meili-key' }),
+    ).toThrow(/MEILI_URL: required, not set/u);
+  });
+
+  it.each([
+    'ftp://meilisearch:7700',
+    'http:meilisearch',
+    'https://fixture-username:fixture-password@meilisearch',
+    'https://meilisearch?key=fixture-query',
+    'https://meilisearch#fixture-fragment',
+  ])('refuses an invalid Meilisearch endpoint with a generic diagnostic', (endpoint) => {
+    const load = (): void => {
+      loadConfig(appConfigSchema, {
+        ...complete,
+        MEILI_URL: endpoint,
+        MEILI_API_KEY: 'fixture-meili-key',
+      });
+    };
+
+    expect(load).toThrow(
+      /^Invalid configuration:\n- MEILI_URL: Expected a Meilisearch HTTP\(S\) URL without credentials, query or fragment\.$/u,
+    );
+  });
+
+  it('refuses an invalid Meilisearch API key without printing it', () => {
+    const load = (): void => {
+      loadConfig(appConfigSchema, {
+        ...complete,
+        MEILI_URL: 'http://meilisearch:7700',
+        MEILI_API_KEY: 'fixture-key\nwith-a-break',
+      });
+    };
+
+    expect(load).toThrow(
+      /^Invalid configuration:\n- MEILI_API_KEY: Expected a Meilisearch API key made of visible ASCII characters\.$/u,
+    );
+  });
+
   it('refuses to start without the database, the broker, the audience or the trusted issuers', () => {
     expect(() => loadConfig(appConfigSchema, { PORT: '3019' })).toThrow(ConfigError);
     try {

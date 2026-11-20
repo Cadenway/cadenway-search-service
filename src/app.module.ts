@@ -12,6 +12,7 @@ import { Module } from '@nestjs/common';
 import { appConfigSchema } from './config/app-config.js';
 import type { AppConfig } from './config/app-config.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
+import { SearchIndexModule } from './modules/search-index/search-index.module.js';
 
 /**
  * Class AppModule
@@ -77,13 +78,16 @@ import { PlatformModule } from './modules/platform/platform.module.js';
     }),
     OutboxModule.forRoot(),
     HealthModule.forRootAsync({
-      inject: [DATABASE_POOL, MessagingConnection],
-      useFactory: (pool: PostgresProbe, connection: MessagingConnection) => ({
-        indicators: [postgresIndicator(pool), messagingHealthIndicator(connection)],
-        shutdownDelayMs: 0,
-      }),
+      inject: [DATABASE_POOL, MessagingConnection, CONFIG],
+      useFactory: (pool: PostgresProbe, connection: MessagingConnection, config: AppConfig) => {
+        const indicators = [postgresIndicator(pool), messagingHealthIndicator(connection)];
+        const searchEngine = SearchIndexModule.readiness(config);
+        if (searchEngine !== null) indicators.push(searchEngine);
+        return { indicators, shutdownDelayMs: 0 };
+      },
     }),
     PlatformModule,
+    SearchIndexModule,
   ],
 })
 export class AppModule {}
