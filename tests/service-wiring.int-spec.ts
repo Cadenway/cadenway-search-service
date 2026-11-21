@@ -966,7 +966,7 @@ describe('search-service wiring', () => {
         claimPage.execute(claim),
         claimPage.execute({ ...claim, claimToken: otherToken }),
       ]);
-      expect(claims.sort()).toEqual(['claimed', 'occupied']);
+      expect([...claims].sort()).toEqual(['claimed', 'occupied']);
       const winner = claims[0] === 'claimed' ? token : otherToken;
       const loser = winner === token ? otherToken : token;
       expect(

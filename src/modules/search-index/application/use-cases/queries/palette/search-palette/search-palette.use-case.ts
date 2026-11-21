@@ -15,6 +15,8 @@ import type { SearchPaletteOutput } from './search-palette.output.js';
 type Membership = NonNullable<Awaited<ReturnType<SearchDelegatedAuthority['getMembership']>>>;
 type Evidence = Awaited<ReturnType<SearchDelegatedAuthority['resolveAccess']>>['results'][number];
 
+const maximumScanDurationMs = 10_000;
+
 /** Returns only indexed palette candidates confirmed by current organization and task authority. */
 export class SearchPalette {
   // #region Constructor
@@ -43,15 +45,22 @@ export class SearchPalette {
       return { kind: 'invalid' };
 
     const binding = { userId: input.userId, organizationId: input.organizationId, normalizedQuery };
+    const signal =
+      input.signal === undefined
+        ? undefined
+        : AbortSignal.any([input.signal, AbortSignal.timeout(maximumScanDurationMs)]);
+    const scanDeadline = performance.now() + maximumScanDurationMs;
+    const isExpired = (): boolean =>
+      signal?.aborted === true || (signal !== undefined && performance.now() >= scanDeadline);
     try {
-      if (input.signal?.aborted) return { kind: 'unavailable' };
+      if (isExpired()) return { kind: 'unavailable' };
       const position =
         input.cursor === undefined ? null : await this.cursor.decode(input.cursor, binding);
       if (input.cursor !== undefined && position === null) return { kind: 'invalid' };
       const membership = await this.authority.getMembership(
         input.organizationId,
         input.userId,
-        input.signal,
+        signal,
       );
       if (membership === null) return { kind: 'not-found' };
 
@@ -59,15 +68,20 @@ export class SearchPalette {
       let after = position;
       const visible: PaletteCandidate[] = [];
       let finished = false;
-      for (let page = 0; page < 50 && !finished && visible.length <= input.limit; page++) {
-        if (input.signal?.aborted) return { kind: 'unavailable' };
+      // HTTP supplies a deadline signal. Internal callers without one retain the fixed scan cap.
+      for (
+        let page = 0;
+        (signal !== undefined || page < 50) && !finished && visible.length <= input.limit;
+        page++
+      ) {
+        if (isExpired()) return { kind: 'unavailable' };
         const result = await this.candidates.read({
           organizationId: input.organizationId,
           normalizedQuery,
           after,
           generation,
           limit: 100,
-          ...(input.signal === undefined ? {} : { signal: input.signal }),
+          ...(signal === undefined ? {} : { signal }),
         });
         if (
           !result.generation ||
@@ -93,7 +107,7 @@ export class SearchPalette {
               membership,
               candidates: result.items.map((item) => ({ kind: item.kind, id: item.id })),
             },
-            input.signal,
+            signal,
           );
           const authorized = matchEvidence(result.items, proofs.results, false);
           for (const item of result.items) {
@@ -114,6 +128,7 @@ export class SearchPalette {
         finished = !result.hasMore;
       }
       if (visible.length <= input.limit && !finished) return { kind: 'unavailable' };
+      if (isExpired()) return { kind: 'unavailable' };
 
       // Task accepts at most 100 candidates. A full page plus its visible lookahead needs
       // two proofs. An empty page still verifies the membership stamp in Task.
@@ -126,21 +141,18 @@ export class SearchPalette {
             membership,
             candidates: batch.map((item) => ({ kind: item.kind, id: item.id })),
           },
-          input.signal,
+          signal,
         );
-        if (
-          matchEvidence(batch, finalProof.results, true).size !== batch.length ||
-          input.signal?.aborted
-        ) {
+        if (matchEvidence(batch, finalProof.results, true).size !== batch.length || isExpired()) {
           return { kind: 'unavailable' };
         }
       }
       const latestMembership = await this.authority.getMembership(
         input.organizationId,
         input.userId,
-        input.signal,
+        signal,
       );
-      if (!sameMembership(membership, latestMembership) || input.signal?.aborted) {
+      if (!sameMembership(membership, latestMembership) || isExpired()) {
         return { kind: 'unavailable' };
       }
 
@@ -152,7 +164,7 @@ export class SearchPalette {
           ...binding,
           after: { kind: last.kind, id: last.id },
         });
-        if (nextCursor.length < 1 || nextCursor.length > 1024 || input.signal?.aborted)
+        if (nextCursor.length < 1 || nextCursor.length > 1024 || isExpired())
           return { kind: 'unavailable' };
       }
       return {
