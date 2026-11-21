@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/Cadenway/cadenway-search-service/compare/v0.3.0...v0.4.0) (2026-11-21)
+
+
+### Features
+
+* **search:** connect the meilisearch index runtime ([#27](https://github.com/Cadenway/cadenway-search-service/issues/27)) ([f464150](https://github.com/Cadenway/cadenway-search-service/commit/f464150ff02138dcc6e8781f2bdbad0be3019613))
+
 ## [0.3.0](https://github.com/Cadenway/cadenway-search-service/compare/v0.2.0...v0.3.0) (2026-11-16)
 
 
