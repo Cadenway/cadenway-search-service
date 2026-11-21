@@ -18,12 +18,21 @@ import { SystemTransactionRunner, TenantTransactionRunner } from '@cadenway/nest
 import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { AppModule } from '../src/app.module.js';
 import { appConfigSchema } from '../src/config/app-config.js';
+import { PromoteSearchRebuild } from '../src/modules/search-index/application/use-cases/commands/rebuild/promote-search-rebuild/promote-search-rebuild.use-case.js';
+import { ClaimSearchExportPage } from '../src/modules/search-index/application/use-cases/commands/rebuild/claim-search-export-page/claim-search-export-page.use-case.js';
+import { RecordSearchRefreshes } from '../src/modules/search-index/application/use-cases/commands/rebuild/record-search-refreshes/record-search-refreshes.use-case.js';
+import { DrizzleSearchParentReconciliation } from '../src/modules/search-index/infrastructure/persistence/drizzle/transactions/rebuild/drizzle-search-parent-reconciliation.unit-of-work.js';
+import { DrizzleSearchRuntimeStateRepository } from '../src/modules/search-index/infrastructure/persistence/drizzle/repositories/rebuild/drizzle-search-runtime-state.repository.js';
+import { DrizzleSearchRebuildExportUnitOfWork } from '../src/modules/search-index/infrastructure/persistence/drizzle/transactions/rebuild/drizzle-search-rebuild-export.unit-of-work.js';
+import { DrizzleSearchRebuildPromotionUnitOfWork } from '../src/modules/search-index/infrastructure/persistence/drizzle/transactions/rebuild/drizzle-search-rebuild-promotion.unit-of-work.js';
+import { DrizzleSearchRefreshUnitOfWork } from '../src/modules/search-index/infrastructure/persistence/drizzle/transactions/rebuild/drizzle-search-refresh.unit-of-work.js';
 
 // The service as main.ts assembles it, on a disposable PostgreSQL and NATS. `@cadenway/nest-testing`
 // does not export its container fixtures yet and a service never depends on `testcontainers` itself,
@@ -59,6 +68,16 @@ const platformTables = [
   'idempotency_keys',
   'outbox_events',
   'processed_events',
+] as const;
+
+/** The Search rebuild state is accessible only to a system transaction. */
+const rebuildTables = [
+  'search_export_checkpoints',
+  'search_index_generations',
+  'search_pending_refreshes',
+  'search_rebuild_control',
+  'search_refresh_receipts',
+  'search_terminal_advisories',
 ] as const;
 
 /**
@@ -208,6 +227,7 @@ describe('search-service wiring', () => {
   let app: NestExpressApplication | undefined;
   let signer: InternalTokenSigner;
   let migrator: pg.Pool;
+  let postgresPort: string;
 
   /**
    * The running application.
@@ -233,7 +253,7 @@ describe('search-service wiring', () => {
       'nats',
       'nats-streams',
     );
-    const postgresPort = hostPort('postgres', '5432');
+    postgresPort = hostPort('postgres', '5432');
 
     vi.stubEnv(
       'MIGRATION_DATABASE_URL',
@@ -309,9 +329,12 @@ describe('search-service wiring', () => {
     );
 
     expect(tables.rows).toEqual(
-      platformTables.map((tablename) => ({ tablename, tableowner: 'search_migrator' })),
+      [...platformTables, ...rebuildTables].map((tablename) => ({
+        tablename,
+        tableowner: 'search_migrator',
+      })),
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: 5 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -320,7 +343,148 @@ describe('search-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: 5 }]);
+  });
+
+  it('upgrades an existing platform database while the old application can still use its data', async () => {
+    const admin = new pg.Pool({
+      connectionString: `postgres://postgres:postgres@127.0.0.1:${postgresPort}/search`,
+      max: 1,
+    });
+    const database = 'search_upgrade_test';
+    let owner: pg.Pool | undefined;
+    let application: pg.Pool | undefined;
+    try {
+      await admin.query(`create database ${database} owner search_migrator`);
+      owner = new pg.Pool({
+        connectionString: `postgres://search_migrator:search_migrator@127.0.0.1:${postgresPort}/${database}`,
+        max: 1,
+      });
+      await owner.query('grant usage on schema public to search_app');
+      await owner.query(
+        'alter default privileges in schema public grant select, insert, update, delete on tables to search_app',
+      );
+      const migrations = readMigrationFiles({
+        migrationsFolder: fileURLToPath(new URL('../migrations', import.meta.url)),
+      });
+      const baseline = migrations[0];
+      const rebuild = migrations[1];
+      const receipts = migrations[2];
+      if (baseline === undefined || rebuild === undefined || receipts === undefined)
+        throw new Error('A prior migration is missing.');
+      await owner.query('create schema drizzle');
+      await owner.query(`create table drizzle.__drizzle_migrations
+        (id serial primary key, hash text not null, created_at bigint)`);
+      for (const statement of baseline.sql) await owner.query(statement);
+      await owner.query(
+        'insert into drizzle.__drizzle_migrations (hash, created_at) values ($1, $2)',
+        [baseline.hash, baseline.folderMillis],
+      );
+      for (const statement of rebuild.sql) await owner.query(statement);
+      await owner.query(
+        'insert into drizzle.__drizzle_migrations (hash, created_at) values ($1, $2)',
+        [rebuild.hash, rebuild.folderMillis],
+      );
+      for (const statement of receipts.sql) await owner.query(statement);
+      await owner.query(
+        'insert into drizzle.__drizzle_migrations (hash, created_at) values ($1, $2)',
+        [receipts.hash, receipts.folderMillis],
+      );
+      await owner.query('begin');
+      await owner.query("select set_config('app.system_access', 'on', true)");
+      await owner.query(`insert into search_index_generations
+        (id, index_uid, status, broker_at_start)
+        values ('01938f6e-0000-7000-8000-000000000095', 'upgrade-before-receipts', 'building', '{}')`);
+      await owner.query(
+        `insert into search_export_checkpoints (generation_id, source, organization_id, cursor)
+        values ('01938f6e-0000-7000-8000-000000000095', 'task', $1, 'prior-cursor')`,
+        [atelierNordId],
+      );
+      await owner.query(
+        `insert into search_pending_refreshes
+        (generation_id, organization_id, resource_kind, source_id, max_broker_sequence)
+        values ('01938f6e-0000-7000-8000-000000000095', $1, 'list', '01938f6e-0000-7000-8000-000000000096', 1)`,
+        [atelierNordId],
+      );
+      await owner.query('commit');
+
+      application = new pg.Pool({
+        connectionString: `postgres://search_app:search_app@127.0.0.1:${postgresPort}/${database}`,
+        max: 1,
+      });
+      const oldTenant = new TenantTransactionRunner(application);
+      await runWithOrganizationContext(memberOf(atelierNordId), () =>
+        oldTenant.run((tx) =>
+          tx.client.query(
+            `insert into event_versions
+          (consumer, organization_id, aggregate_key, version)
+          values ('search-service__wiring-probe', $1, 'task:CAD-482', 7)`,
+            [atelierNordId],
+          ),
+        ),
+      );
+
+      vi.stubEnv(
+        'MIGRATION_DATABASE_URL',
+        `postgres://search_migrator:search_migrator@127.0.0.1:${postgresPort}/${database}`,
+      );
+      try {
+        await runMigrator();
+      } finally {
+        vi.stubEnv(
+          'MIGRATION_DATABASE_URL',
+          `postgres://search_migrator:search_migrator@127.0.0.1:${postgresPort}/search`,
+        );
+      }
+      const previousData = await runWithOrganizationContext(memberOf(atelierNordId), () =>
+        oldTenant.run((tx) =>
+          tx.client.query(
+            `select version from event_versions where aggregate_key = 'task:CAD-482'`,
+          ),
+        ),
+      );
+      expect(previousData.rows).toEqual([{ version: '7' }]);
+      await runWithOrganizationContext(memberOf(atelierNordId), () =>
+        oldTenant.run((tx) =>
+          tx.client.query(
+            `update event_versions set version = 8 where aggregate_key = 'task:CAD-482'`,
+          ),
+        ),
+      );
+      const journal = await owner.query<{ applied: number }>(
+        'select count(*)::int as applied from drizzle.__drizzle_migrations',
+      );
+      expect(journal.rows).toEqual([{ applied: 5 }]);
+      const control = await new SystemTransactionRunner(application).run((tx) =>
+        tx.client.query('select id from search_rebuild_control'),
+      );
+      expect(control.rows).toEqual([{ id: 1 }]);
+      const existingGeneration = await new SystemTransactionRunner(application).run((tx) =>
+        tx.client.query(
+          "select index_uid, status from search_index_generations where index_uid = 'upgrade-before-receipts'",
+        ),
+      );
+      expect(existingGeneration.rows).toEqual([
+        { index_uid: 'upgrade-before-receipts', status: 'building' },
+      ]);
+      const oldCheckpoints = await new SystemTransactionRunner(application).run((tx) =>
+        tx.client.query(
+          'select cursor, write_token, write_deadline from search_export_checkpoints',
+        ),
+      );
+      expect(oldCheckpoints.rows).toEqual([
+        { cursor: 'prior-cursor', write_token: null, write_deadline: null },
+      ]);
+      const oldRefreshes = await new SystemTransactionRunner(application).run((tx) =>
+        tx.client.query('select cascade_phase, cascade_cursor from search_pending_refreshes'),
+      );
+      expect(oldRefreshes.rows).toEqual([{ cascade_phase: null, cascade_cursor: null }]);
+    } finally {
+      await application?.end();
+      await owner?.end();
+      await admin.query(`drop database if exists ${database}`);
+      await admin.end();
+    }
   });
 
   it('forces row-level security on the tables that carry an organization', async () => {
@@ -343,12 +507,680 @@ describe('search-service wiring', () => {
       { relname: 'idempotency_keys', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'outbox_events', relrowsecurity: true, relforcerowsecurity: true },
       { relname: 'processed_events', relrowsecurity: false, relforcerowsecurity: false },
+      ...rebuildTables.map((relname) => ({
+        relname,
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+      })),
     ]);
     expect(policies.rows).toEqual([
       { tablename: 'event_versions', policyname: 'event_versions_organization_isolation' },
       { tablename: 'idempotency_keys', policyname: 'idempotency_keys_organization_isolation' },
       { tablename: 'outbox_events', policyname: 'outbox_events_organization_isolation' },
+      ...rebuildTables.map((tablename) => ({
+        tablename,
+        policyname: `${tablename}_system_only`,
+      })),
     ]);
+  });
+
+  it('reserves rebuild state for system transactions, including the table owner', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const tenant = service().get(TenantTransactionRunner);
+    const generationId = '01938f6e-0000-7000-8000-000000000041';
+
+    await system.run((tx) =>
+      tx.client.query(
+        `insert into search_index_generations (id, index_uid, status, broker_at_start)
+         values ($1, 'atelier-nord-rebuild', 'building', '{}')`,
+        [generationId],
+      ),
+    );
+    await system.run((tx) =>
+      tx.client.query('insert into search_refresh_receipts (event_id) values ($1)', [
+        '01938f6e-0000-7000-8000-000000000094',
+      ]),
+    );
+    try {
+      const control = await system.run((tx) =>
+        tx.client.query('select id from search_rebuild_control'),
+      );
+      expect(control.rows).toEqual([{ id: 1 }]);
+      for (const table of rebuildTables) {
+        const owner = await migrator.query(`select * from ${table}`);
+        expect(owner.rows).toEqual([]);
+        const tenantRows = await runWithOrganizationContext(memberOf(atelierNordId), () =>
+          tenant.run((tx) => tx.client.query(`select * from ${table}`)),
+        );
+        expect(tenantRows.rows).toEqual([]);
+      }
+      await expect(
+        runWithOrganizationContext(memberOf(atelierNordId), () =>
+          tenant.run((tx) =>
+            tx.client.query(
+              `insert into search_terminal_advisories (stream, stream_created_at, consumer, sequence)
+               values ('EVENTS', 'start', 'search', 1)`,
+            ),
+          ),
+        ),
+      ).rejects.toMatchObject({ code: '42501' });
+      await expect(
+        migrator.query(
+          `insert into search_terminal_advisories (stream, stream_created_at, consumer, sequence)
+           values ('EVENTS', 'start', 'search', 1)`,
+        ),
+      ).rejects.toMatchObject({ code: '42501' });
+    } finally {
+      await system.run((tx) =>
+        tx.client.query('delete from search_refresh_receipts where event_id = $1', [
+          '01938f6e-0000-7000-8000-000000000094',
+        ]),
+      );
+      await system.run((tx) =>
+        tx.client.query('delete from search_index_generations where id = $1', [generationId]),
+      );
+    }
+  });
+
+  it('keeps generations, checkpoints and pending refreshes within their rebuild bounds', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const generationId = '01938f6e-0000-7000-8000-000000000042';
+    const run = async (query: string, values: readonly unknown[] = []): Promise<void> => {
+      await system.run((tx) => tx.client.query(query, [...values]));
+    };
+    await run(
+      `insert into search_index_generations (id, index_uid, status, broker_at_start)
+       values ($1, 'atelier-nord-rebuild-bounds', 'building', '{}')`,
+      [generationId],
+    );
+    try {
+      await expect(
+        run(`insert into search_index_generations (index_uid, status, broker_at_start)
+        values ('other-building', 'building', '{}')`),
+      ).rejects.toMatchObject({ code: '23505' });
+      await run(`insert into search_index_generations (index_uid, status, broker_at_start)
+        values ('active-rebuild-bounds', 'active', '{}')`);
+      await expect(
+        run(`insert into search_index_generations (index_uid, status, broker_at_start)
+        values ('other-active', 'active', '{}')`),
+      ).rejects.toMatchObject({ code: '23505' });
+      await run(
+        `insert into search_export_checkpoints (generation_id, source)
+        values ($1, 'organization')`,
+        [generationId],
+      );
+      await expect(
+        run(
+          `insert into search_export_checkpoints (generation_id, source)
+        values ($1, 'organization')`,
+          [generationId],
+        ),
+      ).rejects.toMatchObject({ code: '23505' });
+      await expect(
+        run(
+          `insert into search_export_checkpoints (generation_id, source)
+        values ($1, 'task')`,
+          [generationId],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
+      await expect(
+        run(
+          `insert into search_export_checkpoints (generation_id, source, organization_id, cursor)
+        values ($1, 'task', $2, repeat('x', 1025))`,
+          [generationId, atelierNordId],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
+      await run(
+        `insert into search_pending_refreshes
+        (generation_id, organization_id, resource_kind, source_id, max_broker_sequence)
+        values ($1, $2, 'task', 'CAD-482', 1)`,
+        [generationId, atelierNordId],
+      );
+      await expect(
+        run(
+          `insert into search_pending_refreshes
+        (generation_id, organization_id, resource_kind, source_id, max_broker_sequence)
+        values ($1, $2, 'task', 'CAD-483', 0)`,
+          [generationId, atelierNordId],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
+      await expect(
+        run(
+          `update search_pending_refreshes set claim_token = uuidv7()
+        where generation_id = $1`,
+          [generationId],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
+      await expect(run('insert into search_rebuild_control (id) values (2)')).rejects.toMatchObject(
+        { code: '23514' },
+      );
+    } finally {
+      await run(
+        `delete from search_index_generations where id = $1 or index_uid = 'active-rebuild-bounds'`,
+        [generationId],
+      );
+    }
+  });
+
+  it('promotes a complete generation atomically and preserves the incumbent while evidence is incomplete', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const promote = new PromoteSearchRebuild(new DrizzleSearchRebuildPromotionUnitOfWork(system));
+    const candidateId = '01938f6e-0000-7000-8000-000000000061';
+    const activeId = '01938f6e-0000-7000-8000-000000000062';
+    const engineCreatedAt = '2026-11-20T13:05:00.100Z';
+    const broker = {
+      stream: 'EVENTS',
+      createdAt: '2026-11-20T13:00:00.000001Z',
+      firstSequence: 1,
+      lastSequence: 28,
+      retainedGapCount: 0,
+      consumers: [
+        {
+          handler: 'task-updated',
+          createdAt: '2026-11-20T13:02:00.000001Z',
+          deliveredSequence: 23,
+          ackFloorSequence: 23,
+          pending: 0,
+          ackPending: 0,
+        },
+      ],
+    };
+    const input = { generationId: candidateId, engineCreatedAt, broker };
+    const run = async (query: string, values: readonly unknown[] = []): Promise<void> => {
+      await system.run((tx) => tx.client.query(query, [...values]));
+    };
+    const states = async (): Promise<unknown[]> => {
+      const result = await system.run((tx) =>
+        tx.client.query(
+          'select id, status, certified_broker_frontier from search_index_generations where id = any($1::uuid[]) order by id',
+          [[candidateId, activeId]],
+        ),
+      );
+      return result.rows;
+    };
+    const unchanged = [
+      { id: candidateId, status: 'building', certified_broker_frontier: null },
+      { id: activeId, status: 'active', certified_broker_frontier: null },
+    ];
+    await run(
+      `insert into search_index_generations (id, index_uid, status, engine_created_at, broker_at_start)
+      values ($1, 'candidate-promotion-test', 'building', $3, $4),
+             ($2, 'active-promotion-test', 'active', $3, $4)`,
+      [candidateId, activeId, engineCreatedAt, JSON.stringify({ ...broker, lastSequence: 24 })],
+    );
+    try {
+      await run(
+        `insert into search_export_checkpoints (generation_id, source, organization_id, complete)
+        values ($1, 'organization', null, true), ($1, 'task', $2, true),
+          ($1, 'list', $2, true), ($1, 'space', $2, true),
+          ($1, 'document', $2, true), ($1, 'storage', $2, true)`,
+        [candidateId, atelierNordId],
+      );
+
+      await run(
+        `insert into search_pending_refreshes (generation_id, organization_id, resource_kind, source_id, max_broker_sequence)
+        values ($1, $2, 'task', 'CAD-482', 27)`,
+        [candidateId, atelierNordId],
+      );
+      await expect(promote.execute(input)).rejects.toThrow();
+      expect(await states()).toEqual(unchanged);
+      await run('delete from search_pending_refreshes where generation_id = $1', [candidateId]);
+
+      await run(
+        `insert into search_terminal_advisories (stream, stream_created_at, consumer, sequence)
+        values ($1, $2, 'task-updated', 27)`,
+        [broker.stream, broker.createdAt],
+      );
+      await expect(promote.execute(input)).rejects.toThrow();
+      expect(await states()).toEqual(unchanged);
+      await run(
+        'delete from search_terminal_advisories where stream = $1 and stream_created_at = $2',
+        [broker.stream, broker.createdAt],
+      );
+
+      await run(
+        `update search_export_checkpoints set complete = false where generation_id = $1 and source = 'task'`,
+        [candidateId],
+      );
+      await expect(promote.execute(input)).rejects.toThrow();
+      expect(await states()).toEqual(unchanged);
+      await run(
+        `update search_export_checkpoints set complete = true where generation_id = $1 and source = 'task'`,
+        [candidateId],
+      );
+
+      await run(
+        `delete from search_export_checkpoints where generation_id = $1 and source = 'list'`,
+        [candidateId],
+      );
+      await expect(promote.execute(input)).rejects.toThrow();
+      expect(await states()).toEqual(unchanged);
+      await run(
+        `insert into search_export_checkpoints (generation_id, source, organization_id, complete)
+        values ($1, 'list', $2, true)`,
+        [candidateId, otherOrganizationId],
+      );
+      await expect(promote.execute(input)).rejects.toThrow();
+      expect(await states()).toEqual(unchanged);
+      await run(
+        `update search_export_checkpoints set organization_id = $2 where generation_id = $1 and source = 'list'`,
+        [candidateId, atelierNordId],
+      );
+
+      await promote.execute(input);
+      expect(await states()).toEqual([
+        { id: candidateId, status: 'active', certified_broker_frontier: '28' },
+        { id: activeId, status: 'retired', certified_broker_frontier: null },
+      ]);
+      await promote.execute(input);
+      expect(await states()).toEqual([
+        { id: candidateId, status: 'active', certified_broker_frontier: '28' },
+        { id: activeId, status: 'retired', certified_broker_frontier: null },
+      ]);
+    } finally {
+      await run(
+        `delete from search_terminal_advisories where stream = $1 and stream_created_at = $2`,
+        [broker.stream, broker.createdAt],
+      );
+      await run('delete from search_index_generations where id = any($1::uuid[])', [
+        [candidateId, activeId],
+      ]);
+    }
+  });
+
+  it('fans out and fences refreshes across concurrent claims and later events', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const unit = new DrizzleSearchRefreshUnitOfWork(system);
+    const record = new RecordSearchRefreshes(unit);
+    const active = '01938f6e-0000-7000-8000-000000000071';
+    const building = '01938f6e-0000-7000-8000-000000000072';
+    const retired = '01938f6e-0000-7000-8000-000000000073';
+    const firstToken = '01938f6e-0000-7000-8000-000000000081';
+    const secondToken = '01938f6e-0000-7000-8000-000000000082';
+    const firstEvent = '01938f6e-0000-7000-8000-000000000091';
+    const secondEvent = '01938f6e-0000-7000-8000-000000000092';
+    const failedEvent = '01938f6e-0000-7000-8000-000000000093';
+    const target = { organizationId: atelierNordId, kind: 'task' as const, sourceId: 'CAD-482' };
+    const deadline = new Date('2020-01-01T00:00:00Z');
+    const run = async (query: string, values: readonly unknown[] = []): Promise<void> => {
+      await system.run((tx) => tx.client.query(query, [...values]));
+    };
+    const rows = async (): Promise<unknown[]> => {
+      const result = await system.run((tx) =>
+        tx.client.query(
+          `select generation_id, max_broker_sequence, revision, claim_token
+           from search_pending_refreshes where generation_id = any($1::uuid[])
+          order by generation_id`,
+          [[active, building, retired]],
+        ),
+      );
+      return result.rows;
+    };
+    await run(
+      `insert into search_index_generations (id, index_uid, status, engine_created_at, broker_at_start)
+      values ($1, 'queue-active', 'active', 'engine-one', '{}'),
+        ($2, 'queue-building', 'building', 'engine-two', '{}'),
+        ($3, 'queue-retired', 'retired', 'engine-three', '{}')`,
+      [active, building, retired],
+    );
+    try {
+      await record.execute({ eventId: firstEvent, brokerSequence: 10, targets: [target, target] });
+      await record.execute({ eventId: firstEvent, brokerSequence: 10, targets: [target] });
+      expect(await rows()).toEqual([
+        { generation_id: active, max_broker_sequence: '10', revision: '1', claim_token: null },
+        { generation_id: building, max_broker_sequence: '10', revision: '1', claim_token: null },
+      ]);
+      const claims = await Promise.all([
+        unit.run((tx) => tx.claimNext(active, firstToken, deadline)),
+        unit.run((tx) => tx.claimNext(active, secondToken, deadline)),
+      ]);
+      const claim = claims.find((item) => item !== null);
+      expect(claims.filter((item) => item !== null)).toHaveLength(1);
+      if (claim === undefined) throw new Error('No refresh was claimed.');
+      expect(claim.revision).toBe(1);
+      expect(await unit.run((tx) => tx.claimNext(active, secondToken, deadline))).toBeNull();
+
+      await record.execute({ eventId: secondEvent, brokerSequence: 11, targets: [target] });
+      await record.execute({ eventId: secondEvent, brokerSequence: 11, targets: [target] });
+      await unit.run((tx) =>
+        tx.finish({ ...claim, token: '01938f6e-0000-7000-8000-000000000083' }, 'applied'),
+      );
+      expect((await rows())[0]).toEqual({
+        generation_id: active,
+        max_broker_sequence: '11',
+        revision: '2',
+        claim_token: claim.token,
+      });
+      await unit.run((tx) => tx.finish(claim, 'applied'));
+      expect((await rows())[0]).toEqual({
+        generation_id: active,
+        max_broker_sequence: '11',
+        revision: '2',
+        claim_token: null,
+      });
+
+      const latest = await unit.run((tx) => tx.claimNext(active, secondToken, deadline));
+      expect(latest).toMatchObject({ revision: 2, token: secondToken });
+      if (latest === null) throw new Error('No updated refresh was claimed.');
+      await unit.run((tx) => tx.finish(latest, 'released'));
+      const retry = await unit.run((tx) => tx.claimNext(active, firstToken, deadline));
+      expect(retry).toMatchObject({ revision: 2, token: firstToken });
+      if (retry === null) throw new Error('The released refresh was not claimable.');
+      await unit.run((tx) => tx.finish(retry, 'applied'));
+      expect(await rows()).toEqual([
+        { generation_id: building, max_broker_sequence: '11', revision: '2', claim_token: null },
+      ]);
+
+      const buildingClaim = await unit.run((tx) => tx.claimNext(building, secondToken, deadline));
+      if (buildingClaim === null) throw new Error('The building generation refresh is missing.');
+      await unit.run((tx) => tx.finish(buildingClaim, 'applied'));
+      await record.execute({ eventId: firstEvent, brokerSequence: 10, targets: [target] });
+      await record.execute({ eventId: secondEvent, brokerSequence: 11, targets: [target] });
+      expect(await rows()).toEqual([]);
+
+      await expect(
+        record.execute({
+          eventId: failedEvent,
+          brokerSequence: 12,
+          targets: [{ ...target, sourceId: 'x'.repeat(513) }],
+        }),
+      ).rejects.toThrow();
+      const failedReceipt = await system.run((tx) =>
+        tx.client.query('select event_id from search_refresh_receipts where event_id = $1', [
+          failedEvent,
+        ]),
+      );
+      expect(failedReceipt.rows).toEqual([]);
+      expect(await rows()).toEqual([]);
+
+      await run(
+        `insert into search_pending_refreshes (generation_id, organization_id, resource_kind, source_id, max_broker_sequence)
+        values ($1, $2, 'task', 'CAD-482', 11)`,
+        [retired, atelierNordId],
+      );
+      expect(await unit.run((tx) => tx.claimNext(retired, firstToken, deadline))).toBeNull();
+    } finally {
+      await run('delete from search_refresh_receipts where event_id = any($1::uuid[])', [
+        [firstEvent, secondEvent, failedEvent],
+      ]);
+      await run('delete from search_index_generations where id = any($1::uuid[])', [
+        [active, building, retired],
+      ]);
+    }
+  });
+
+  it('serializes tenant export intents and never takes over an expired physical write', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const unit = new DrizzleSearchRebuildExportUnitOfWork(system);
+    const claimPage = new ClaimSearchExportPage(unit);
+    const generationId = '01938f6e-0000-7000-8000-000000000101';
+    const token = '01938f6e-0000-7000-8000-000000000102';
+    const otherToken = '01938f6e-0000-7000-8000-000000000103';
+    const run = async (query: string, values: readonly unknown[] = []): Promise<void> => {
+      await system.run((tx) => tx.client.query(query, [...values]));
+    };
+    const claim = {
+      generationId,
+      organizationId: atelierNordId,
+      source: 'task' as const,
+      expectedCursor: null,
+      claimToken: token,
+      claimedAt: new Date(),
+      claimDeadline: new Date(Date.now() + 60_000),
+    };
+    await run(
+      `insert into search_index_generations (id, index_uid, status, engine_created_at, broker_at_start)
+      values ($1, 'export-intent-test', 'building', 'engine', '{}')`,
+      [generationId],
+    );
+    try {
+      await run(
+        `insert into search_export_checkpoints (generation_id, source, organization_id)
+        values ($1, 'organization', null), ($1, 'task', $2), ($1, 'list', $2)`,
+        [generationId, atelierNordId],
+      );
+      await expect(
+        run(
+          `update search_export_checkpoints set write_token = $2
+        where generation_id = $1 and source = 'task'`,
+          [generationId, token],
+        ),
+      ).rejects.toThrow();
+      await expect(
+        run(
+          `update search_export_checkpoints set write_token = $2, write_deadline = now() + interval '1 minute'
+        where generation_id = $1 and source = 'organization'`,
+          [generationId, token],
+        ),
+      ).rejects.toThrow();
+      await expect(
+        run(
+          `update search_export_checkpoints set complete = true, write_token = $2, write_deadline = now() + interval '1 minute'
+        where generation_id = $1 and source = 'list'`,
+          [generationId, token],
+        ),
+      ).rejects.toThrow();
+
+      expect(await claimPage.execute({ ...claim, expectedCursor: 'wrong' })).toBe('stale');
+      const claims = await Promise.all([
+        claimPage.execute(claim),
+        claimPage.execute({ ...claim, claimToken: otherToken }),
+      ]);
+      expect(claims.sort()).toEqual(['claimed', 'occupied']);
+      const winner = claims[0] === 'claimed' ? token : otherToken;
+      const loser = winner === token ? otherToken : token;
+      expect(
+        await unit.run((tx) =>
+          tx.recordExportPage({ ...claim, claimToken: loser, nextCursor: 'page-two' }),
+        ),
+      ).toBe('stale');
+      expect(
+        await unit.run((tx) =>
+          tx.recordExportPage({ ...claim, claimToken: winner, nextCursor: 'page-two' }),
+        ),
+      ).toBe('applied');
+      expect(await claimPage.execute({ ...claim, expectedCursor: 'page-two' })).toBe('claimed');
+      await run(
+        `update search_export_checkpoints set write_deadline = now() - interval '1 second'
+        where generation_id = $1 and source = 'task'`,
+        [generationId],
+      );
+      expect(
+        await claimPage.execute({ ...claim, expectedCursor: 'page-two', claimToken: otherToken }),
+      ).toBe('expired');
+      expect(
+        await unit.run((tx) =>
+          tx.recordExportPage({ ...claim, expectedCursor: 'page-two', nextCursor: null }),
+        ),
+      ).toBe('stale');
+    } finally {
+      await run('delete from search_index_generations where id = $1', [generationId]);
+    }
+  });
+
+  it('commits parent progress with child invalidations and restarts after a newer parent revision', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const parent = new DrizzleSearchParentReconciliation(system);
+    const generationId = '01938f6e-0000-7000-8000-000000000111';
+    const listId = '01938f6e-0000-7000-8000-000000000112';
+    const token = '01938f6e-0000-7000-8000-000000000113';
+    const run = async (query: string, values: readonly unknown[] = []): Promise<void> => {
+      await system.run((tx) => tx.client.query(query, [...values]));
+    };
+    await run(
+      `insert into search_index_generations (id, index_uid, status, engine_created_at, broker_at_start)
+      values ($1, 'parent-cascade-test', 'building', 'engine', '{}')`,
+      [generationId],
+    );
+    try {
+      await run(
+        `insert into search_pending_refreshes (generation_id, organization_id, resource_kind, source_id, max_broker_sequence)
+        values ($1, $2, 'list', $3, 17)`,
+        [generationId, atelierNordId, listId],
+      );
+      await expect(
+        run(
+          `update search_pending_refreshes set cascade_phase = 'lists'
+        where generation_id = $1`,
+          [generationId],
+        ),
+      ).rejects.toThrow();
+      await expect(
+        run(
+          `update search_pending_refreshes set cascade_phase = 'self', cascade_cursor = 'invalid'
+        where generation_id = $1`,
+          [generationId],
+        ),
+      ).rejects.toThrow();
+      await expect(
+        run(
+          `update search_pending_refreshes set cascade_phase = 'tasks', cascade_cursor = repeat('x', 1025)
+        where generation_id = $1`,
+          [generationId],
+        ),
+      ).rejects.toThrow();
+      const first = await parent.claimNextParent(
+        generationId,
+        token,
+        new Date(Date.now() + 60_000),
+      );
+      if (first === null) throw new Error('The parent refresh is missing.');
+      expect(first.checkpoint).toEqual({ phase: 'indexed', cursor: null });
+      const child = { organizationId: atelierNordId, kind: 'task' as const, sourceId: 'CAD-482' };
+      await expect(
+        parent.advance({
+          claim: first.claim,
+          expected: first.checkpoint,
+          next: { phase: 'tasks', cursor: 'page-two' },
+          children: [child, { ...child, sourceId: 'x'.repeat(513) }],
+        }),
+      ).rejects.toThrow();
+      const afterFailure = await system.run((tx) =>
+        tx.client.query(
+          `select resource_kind, cascade_phase, cascade_cursor, claim_token
+        from search_pending_refreshes where generation_id = $1`,
+          [generationId],
+        ),
+      );
+      expect(afterFailure.rows).toEqual([
+        {
+          resource_kind: 'list',
+          cascade_phase: 'indexed',
+          cascade_cursor: null,
+          claim_token: token,
+        },
+      ]);
+      expect(
+        await parent.advance({
+          claim: first.claim,
+          expected: first.checkpoint,
+          next: { phase: 'tasks', cursor: 'page-two' },
+          children: [child],
+        }),
+      ).toBe('advanced');
+      const afterPage = await system.run((tx) =>
+        tx.client.query(
+          `select resource_kind, source_id, cascade_phase, cascade_cursor
+        from search_pending_refreshes where generation_id = $1 order by resource_kind`,
+          [generationId],
+        ),
+      );
+      expect(afterPage.rows).toEqual([
+        {
+          resource_kind: 'list',
+          source_id: listId,
+          cascade_phase: 'tasks',
+          cascade_cursor: 'page-two',
+        },
+        { resource_kind: 'task', source_id: 'CAD-482', cascade_phase: null, cascade_cursor: null },
+      ]);
+      const second = await parent.claimNextParent(
+        generationId,
+        token,
+        new Date(Date.now() + 60_000),
+      );
+      if (second === null) throw new Error('The parent continuation is missing.');
+      await run(
+        `update search_pending_refreshes set revision = revision + 1, max_broker_sequence = 18
+        where generation_id = $1 and resource_kind = 'list'`,
+        [generationId],
+      );
+      expect(
+        await parent.advance({
+          claim: second.claim,
+          expected: second.checkpoint,
+          next: { phase: 'self', cursor: null },
+          children: [{ ...child, sourceId: 'CAD-483' }],
+        }),
+      ).toBe('restarted');
+      const restarted = await system.run((tx) =>
+        tx.client.query(
+          `select resource_kind, source_id, cascade_phase, cascade_cursor, claim_token
+        from search_pending_refreshes where generation_id = $1 order by resource_kind`,
+          [generationId],
+        ),
+      );
+      expect(restarted.rows).toEqual([
+        {
+          resource_kind: 'list',
+          source_id: listId,
+          cascade_phase: 'indexed',
+          cascade_cursor: null,
+          claim_token: null,
+        },
+        {
+          resource_kind: 'task',
+          source_id: 'CAD-482',
+          cascade_phase: null,
+          cascade_cursor: null,
+          claim_token: null,
+        },
+      ]);
+    } finally {
+      await run('delete from search_index_generations where id = $1', [generationId]);
+    }
+  });
+
+  it('prunes old refresh receipts in bounded batches while keeping recent deliveries', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const repository = new DrizzleSearchRuntimeStateRepository(system);
+    const inserted = await system.run((tx) =>
+      tx.client.query(
+        `insert into search_refresh_receipts (event_id, processed_at)
+       select uuidv7(), now() - interval '46 days' from generate_series(1, 1001)
+       union all select uuidv7(), now() - interval '44 days'
+       returning event_id`,
+      ),
+    );
+    const ids = (inserted.rows as readonly { readonly event_id: string }[]).map(
+      (row) => row.event_id,
+    );
+    try {
+      expect(await repository.pruneReceipts()).toBe(1000);
+      const afterFirst = await system.run((tx) =>
+        tx.client.query(
+          'select count(*)::int as count from search_refresh_receipts where event_id = any($1::uuid[])',
+          [ids],
+        ),
+      );
+      expect(afterFirst.rows).toEqual([{ count: 2 }]);
+      expect(await repository.pruneReceipts()).toBe(1);
+      const recent = await system.run((tx) =>
+        tx.client.query(
+          `select count(*)::int as count from search_refresh_receipts
+         where event_id = any($1::uuid[]) and processed_at > now() - interval '45 days'`,
+          [ids],
+        ),
+      );
+      expect(recent.rows).toEqual([{ count: 1 }]);
+      expect(await repository.pruneReceipts()).toBe(0);
+    } finally {
+      await system.run((tx) =>
+        tx.client.query('delete from search_refresh_receipts where event_id = any($1::uuid[])', [
+          ids,
+        ]),
+      );
+    }
   });
 
   it('answers the liveness probe without a token', async () => {
@@ -517,38 +1349,147 @@ describe('search-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: 5 }]);
   });
 
-  it('settles a redacted outbox event', async () => {
+  it('redelivers a Search event after rollback and acknowledges it after its refresh commits', async () => {
     const system = service().get(SystemTransactionRunner);
-    const eventId = '01938f6e-0000-7000-8000-000000000011';
-    // Search cannot publish business events, so use a redacted row that must not be republished.
+    const eventId = '01938f6e-0000-7000-8000-000000000096';
+    const generationId = '01938f6e-0000-7000-8000-000000000097';
+    const event = {
+      id: eventId,
+      organizationId: atelierNordId,
+      actor: { type: 'system', id: 'test-fixture' },
+      occurredAt: '2026-05-15T12:00:00.000Z',
+      version: 4,
+      key: 'CAD-482',
+      entryId: '01938f6e-0000-7000-8000-000000000098',
+      rootKey: 'CAD-482',
+      parentKey: null,
+      listId: '01938f6e-0000-7000-8000-000000000099',
+      spaceId: '01938f6e-0000-7000-8000-000000000100',
+    };
+    let consumerApp: NestExpressApplication | undefined;
     await system.run(({ client }) =>
       client.query(
-        `insert into outbox_events (id, event_name, subject, stream, payload)
-         values ($1, 'search.wiring-probe.v1', 'evt.search.wiring-probe.v1', 'EVENTS',
-                 jsonb_build_object('id', $1::uuid, '$redacted', true))`,
-        [eventId],
+        `insert into search_index_generations (id, index_uid, status, engine_created_at, broker_at_start)
+         values ($1, 'event-redelivery', 'active', 'engine', '{}')`,
+        [generationId],
       ),
     );
     try {
+      vi.stubEnv('MEILI_URL', 'http://127.0.0.1:7700');
+      vi.stubEnv('MEILI_API_KEY', 'synthetic-test-key');
+      vi.stubEnv('INTERNAL_TOKEN_PRIVATE_JWK', JSON.stringify(gateway.privateJwk));
+      for (const key of [
+        'TASK_SERVICE_URL',
+        'ORGANIZATION_SERVICE_URL',
+        'DOCUMENT_SERVICE_URL',
+        'STORAGE_SERVICE_URL',
+      ]) {
+        vi.stubEnv(key, 'http://127.0.0.1:3019');
+      }
+      const config = loadConfig(appConfigSchema);
+      consumerApp = await createApplication(AppModule, {
+        service: 'search-service',
+        config,
+        internalToken: {
+          verifier: {
+            audience: config.INTERNAL_TOKEN_AUDIENCE,
+            trustedIssuers: config.INTERNAL_TOKEN_TRUSTED_ISSUERS,
+          },
+        },
+        logDestination: { write: (): void => undefined },
+      });
+      await consumerApp.init();
+      await migrator.query('revoke insert on search_pending_refreshes from search_app');
+      compose(
+        'exec',
+        '-T',
+        'nats-streams',
+        'nats',
+        'pub',
+        'evt.task.purged.v1',
+        JSON.stringify(event),
+      );
+      await vi.waitFor(
+        () => {
+          const info = JSON.parse(
+            compose(
+              'exec',
+              '-T',
+              'nats-streams',
+              'nats',
+              'consumer',
+              'info',
+              'EVENTS',
+              'search-service__index-task-purged-v1',
+              '--json',
+            ),
+          ) as { readonly num_redelivered: number };
+          expect(info.num_redelivered).toBeGreaterThan(0);
+        },
+        { timeout: 30_000, interval: 250 },
+      );
+      const rolledBack = await system.run(({ client }) =>
+        client.query('select event_id from search_refresh_receipts where event_id = $1', [eventId]),
+      );
+      expect(rolledBack.rows).toEqual([]);
+      await migrator.query('grant insert on search_pending_refreshes to search_app');
       await vi.waitFor(
         async () => {
-          const sent = await system.run(({ client }) =>
-            client.query('select status from outbox_events where id = $1', [eventId]),
+          const queued = await system.run(({ client }) =>
+            client.query(
+              'select source_id, revision from search_pending_refreshes where generation_id = $1',
+              [generationId],
+            ),
           );
-          expect(sent.rows).toEqual([{ status: 'sent' }]);
+          expect(queued.rows).toEqual([{ source_id: 'CAD-482', revision: '1' }]);
+          const receipt = await system.run(({ client }) =>
+            client.query('select event_id from search_refresh_receipts where event_id = $1', [
+              eventId,
+            ]),
+          );
+          expect(receipt.rows).toEqual([{ event_id: eventId }]);
+          const info = JSON.parse(
+            compose(
+              'exec',
+              '-T',
+              'nats-streams',
+              'nats',
+              'consumer',
+              'info',
+              'EVENTS',
+              'search-service__index-task-purged-v1',
+              '--json',
+            ),
+          ) as { readonly num_ack_pending: number; readonly num_pending: number };
+          expect(info.num_ack_pending).toBe(0);
+          expect(info.num_pending).toBe(0);
         },
-        { timeout: 10_000, interval: 100 },
+        { timeout: 30_000, interval: 250 },
       );
-      expect((await request(service().getHttpServer()).get('/health/ready')).status).toBe(200);
     } finally {
+      await migrator.query('grant insert on search_pending_refreshes to search_app');
+      await consumerApp?.close();
       await system.run(({ client }) =>
-        client.query('delete from outbox_events where id = $1', [eventId]),
+        client.query('delete from search_refresh_receipts where event_id = $1', [eventId]),
       );
+      await system.run(({ client }) =>
+        client.query('delete from search_index_generations where id = $1', [generationId]),
+      );
+      for (const key of [
+        'MEILI_URL',
+        'MEILI_API_KEY',
+        'INTERNAL_TOKEN_PRIVATE_JWK',
+        'TASK_SERVICE_URL',
+        'ORGANIZATION_SERVICE_URL',
+        'DOCUMENT_SERVICE_URL',
+        'STORAGE_SERVICE_URL',
+      ])
+        vi.stubEnv(key, undefined);
     }
-  });
+  }, 90_000);
 
   it('runs against a broker that enforces the permissions of cadenway-ops', () => {
     const search = { NATS_USER: 'search', NATS_PASSWORD: 'search' };

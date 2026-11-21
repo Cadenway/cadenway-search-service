@@ -1,10 +1,37 @@
-import { baseConfigShape, internalTokenVerifierConfigShape } from '@cadenway/nest-common';
-import type { BaseConfig, InternalTokenVerifierConfig } from '@cadenway/nest-common';
+import {
+  baseConfigShape,
+  internalTokenSignerConfigShape,
+  internalTokenVerifierConfigShape,
+} from '@cadenway/nest-common';
+import type {
+  BaseConfig,
+  InternalTokenSignerConfig,
+  InternalTokenVerifierConfig,
+} from '@cadenway/nest-common';
 import { databaseConfigShape } from '@cadenway/nest-common/database';
 import type { DatabaseConfig } from '@cadenway/nest-common/database';
 import { messagingConfigShape } from '@cadenway/nest-messaging';
 import type { MessagingConfig } from '@cadenway/nest-messaging';
 import { z } from 'zod';
+
+const authorityUrl = z
+  .string()
+  .refine(
+    (value): boolean =>
+      /^[!-~]+$/u.test(value) &&
+      /^https?:\/\/[^/?#\\@%]+\/?$/iu.test(value) &&
+      URL.parse(value) !== null,
+    'Expected an HTTP(S) origin without credentials, path, query or fragment.',
+  )
+  .optional();
+
+const authoritySettings = [
+  'TASK_SERVICE_URL',
+  'ORGANIZATION_SERVICE_URL',
+  'DOCUMENT_SERVICE_URL',
+  'STORAGE_SERVICE_URL',
+  'INTERNAL_TOKEN_PRIVATE_JWK',
+] as const;
 
 /**
  * Type AppConfig
@@ -26,14 +53,29 @@ import { z } from 'zod';
  *   without them.
  * - `INTERNAL_TOKEN_AUDIENCE` and `INTERNAL_TOKEN_TRUSTED_ISSUERS`: the `aud` this service accepts
  *   and the public keys of the backends allowed to call it.
+ * - `TASK_SERVICE_URL`, `ORGANIZATION_SERVICE_URL`, `DOCUMENT_SERVICE_URL`,
+ *   `STORAGE_SERVICE_URL` and `INTERNAL_TOKEN_PRIVATE_JWK`: one optional group for Search's
+ *   signed outbound calls. All five values are required when those calls are configured.
+ * - `MEILI_URL` and `MEILI_API_KEY`: the HTTP endpoint and API key for Meilisearch. Both are
+ *   required when Meilisearch is configured and optional together.
+ * - `SEARCH_PALETTE_CURSOR_SECRET`: the optional base64url-encoded 32-byte key shared by
+ *   Search replicas to authenticate palette cursors.
  *
  * `OTEL_EXPORTER_OTLP_ENDPOINT` is read by `telemetry.ts`, before the application exists.
- * `MEILI_URL` and `MEILI_API_KEY` are set for the search index and read by nothing until it is
- * wired; they join this schema then.
- *
- * @type {BaseConfig & DatabaseConfig & MessagingConfig & InternalTokenVerifierConfig}
  */
-export type AppConfig = BaseConfig & DatabaseConfig & MessagingConfig & InternalTokenVerifierConfig;
+export type AppConfig = BaseConfig &
+  DatabaseConfig &
+  MessagingConfig &
+  InternalTokenVerifierConfig & {
+    readonly TASK_SERVICE_URL?: string;
+    readonly ORGANIZATION_SERVICE_URL?: string;
+    readonly DOCUMENT_SERVICE_URL?: string;
+    readonly STORAGE_SERVICE_URL?: string;
+    readonly INTERNAL_TOKEN_PRIVATE_JWK?: InternalTokenSignerConfig['INTERNAL_TOKEN_PRIVATE_JWK'];
+    readonly MEILI_URL?: string;
+    readonly MEILI_API_KEY?: string;
+    readonly SEARCH_PALETTE_CURSOR_SECRET?: string;
+  };
 
 /**
  * Constant appConfigSchema
@@ -46,12 +88,70 @@ export type AppConfig = BaseConfig & DatabaseConfig & MessagingConfig & Internal
  *
  * @type {z.ZodType<AppConfig>}
  */
-export const appConfigSchema: z.ZodType<AppConfig> = z.object({
-  ...baseConfigShape,
-  ...databaseConfigShape,
-  ...messagingConfigShape,
-  ...internalTokenVerifierConfigShape,
-});
+export const appConfigSchema: z.ZodType<AppConfig> = z
+  .object({
+    ...baseConfigShape,
+    ...databaseConfigShape,
+    ...messagingConfigShape,
+    ...internalTokenVerifierConfigShape,
+    TASK_SERVICE_URL: authorityUrl,
+    ORGANIZATION_SERVICE_URL: authorityUrl,
+    DOCUMENT_SERVICE_URL: authorityUrl,
+    STORAGE_SERVICE_URL: authorityUrl,
+    INTERNAL_TOKEN_PRIVATE_JWK:
+      internalTokenSignerConfigShape.INTERNAL_TOKEN_PRIVATE_JWK.optional(),
+    MEILI_URL: z
+      .string()
+      .refine((value): boolean => {
+        const endpoint = URL.parse(value);
+        return (
+          endpoint !== null &&
+          /^https?:\/\//iu.test(value) &&
+          endpoint.username === '' &&
+          endpoint.password === '' &&
+          !/[?#]/u.test(value)
+        );
+      }, 'Expected a Meilisearch HTTP(S) URL without credentials, query or fragment.')
+      .optional(),
+    MEILI_API_KEY: z
+      .string()
+      .regex(/^[!-~]+$/u, 'Expected a Meilisearch API key made of visible ASCII characters.')
+      .optional(),
+    SEARCH_PALETTE_CURSOR_SECRET: z.preprocess(
+      (value) => (value === '' ? undefined : value),
+      z
+        .string()
+        .regex(/^[a-zA-Z0-9_-]{43}$/u, 'Expected 32 bytes encoded as unpadded base64url.')
+        .refine(
+          (value) => Buffer.from(value, 'base64url').toString('base64url') === value,
+          'Expected canonical base64url.',
+        )
+        .optional(),
+    ),
+  })
+  .superRefine((config, ctx): void => {
+    const hasUrl = config.MEILI_URL !== undefined;
+    const hasKey = config.MEILI_API_KEY !== undefined;
+    if (hasUrl !== hasKey) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [hasUrl ? 'MEILI_API_KEY' : 'MEILI_URL'],
+        message: 'Configure both Meilisearch variables together.',
+      });
+    }
+
+    if (authoritySettings.some((key) => config[key] !== undefined)) {
+      for (const key of authoritySettings) {
+        if (config[key] === undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [key],
+            message: 'Configure all Search authority settings together.',
+          });
+        }
+      }
+    }
+  });
 
 /**
  * Interface MigrationConfig

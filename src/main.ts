@@ -4,6 +4,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module.js';
 import { appConfigSchema } from './config/app-config.js';
 import type { AppConfig } from './config/app-config.js';
+import { configureSearchPaletteCache } from './infrastructure/http/search-palette-cache.js';
 
 // Started after the instrumentation hooks and `telemetry.js`, with the heap capped for the 256M
 // container: `node --max-old-space-size=160 --import @cadenway/nest-common/register
@@ -26,5 +27,6 @@ await runApplication({ service: 'search-service' }, async (): Promise<void> => {
       },
     },
   });
+  configureSearchPaletteCache(app);
   await app.listen(config.PORT);
 });

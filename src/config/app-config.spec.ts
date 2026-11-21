@@ -18,6 +18,20 @@ describe('appConfigSchema', () => {
     INTERNAL_TOKEN_AUDIENCE: 'search-service',
     INTERNAL_TOKEN_TRUSTED_ISSUERS: trustedIssuers,
   };
+  const authorityJwk = {
+    kty: 'OKP',
+    crv: 'Ed25519',
+    x: 'A'.repeat(43),
+    d: 'B'.repeat(42) + 'A',
+    kid: 'authority-shape-fixture',
+  };
+  const authority = {
+    TASK_SERVICE_URL: 'http://task-service:3013',
+    ORGANIZATION_SERVICE_URL: 'http://organization-service:3011/',
+    DOCUMENT_SERVICE_URL: 'https://document-service:3014',
+    STORAGE_SERVICE_URL: 'http://[::1]:3015',
+    INTERNAL_TOKEN_PRIVATE_JWK: JSON.stringify(authorityJwk),
+  };
 
   it('reads the variables of the service with the defaults of the kit', () => {
     expect(loadConfig(appConfigSchema, complete)).toEqual({
@@ -51,6 +65,118 @@ describe('appConfigSchema', () => {
 
     expect(() => loadConfig(appConfigSchema, example)).not.toThrow();
     expect(() => loadConfig(migrationConfigSchema, example)).not.toThrow();
+  });
+
+  it('loads four Search authority origins and parses the signer with the kit schema', () => {
+    expect(loadConfig(appConfigSchema, { ...complete, ...authority })).toMatchObject({
+      ...authority,
+      INTERNAL_TOKEN_PRIVATE_JWK: authorityJwk,
+    });
+  });
+
+  it('treats a blank Search authority group as unconfigured', () => {
+    const settings = Object.fromEntries(Object.keys(authority).map((key) => [key, '']));
+    expect(loadConfig(appConfigSchema, { ...complete, ...settings })).toEqual(
+      loadConfig(appConfigSchema, complete),
+    );
+  });
+
+  it.each(Object.keys(authority))('requires %s when the rest of the Search group is set', (key) => {
+    expect(() => loadConfig(appConfigSchema, { ...complete, ...authority, [key]: '' })).toThrow(
+      new RegExp(`${key}: required, not set`, 'u'),
+    );
+  });
+
+  it.each([
+    'ftp://task-service',
+    'https:task-service',
+    'http:///task-service',
+    'https://@task-service',
+    'https://name:fixture-password@task-service',
+    'https://task-service/path',
+    'https://task-service?',
+    'https://task-service#',
+    'https://task-service\\other',
+    'https://%74ask-service',
+    'https://ta\tsk-service',
+    'https://task-service ',
+  ])('refuses an ambiguous or unsafe authority origin %j', (endpoint) => {
+    expect(() =>
+      loadConfig(appConfigSchema, { ...complete, ...authority, TASK_SERVICE_URL: endpoint }),
+    ).toThrow(
+      /^Invalid configuration:\n- TASK_SERVICE_URL: Expected an HTTP\(S\) origin without credentials, path, query or fragment\.$/u,
+    );
+  });
+
+  it('reports an invalid signer without revealing the configured value', () => {
+    const load = (): void => {
+      loadConfig(appConfigSchema, {
+        ...complete,
+        ...authority,
+        INTERNAL_TOKEN_PRIVATE_JWK: 'fixture-not-a-jwk',
+      });
+    };
+    expect(load).toThrow(/^Invalid configuration:\n- INTERNAL_TOKEN_PRIVATE_JWK:/u);
+    expect(load).not.toThrow(/fixture-not-a-jwk/u);
+  });
+
+  it('loads the Meilisearch endpoint and API key together', () => {
+    const settings = {
+      MEILI_URL: 'https://search.example.test:7700/meili',
+      MEILI_API_KEY: 'fixture-meili-key',
+    };
+
+    expect(loadConfig(appConfigSchema, { ...complete, ...settings })).toMatchObject(settings);
+  });
+
+  it('treats two empty Meilisearch settings as absent', () => {
+    const config = loadConfig(appConfigSchema, { ...complete, MEILI_URL: '', MEILI_API_KEY: '' });
+
+    expect(config).not.toHaveProperty('MEILI_URL');
+    expect(config).not.toHaveProperty('MEILI_API_KEY');
+  });
+
+  it('names the missing Meilisearch variable when only one is configured', () => {
+    expect(() =>
+      loadConfig(appConfigSchema, { ...complete, MEILI_URL: 'http://meilisearch:7700' }),
+    ).toThrow(/MEILI_API_KEY: required, not set/u);
+    expect(() =>
+      loadConfig(appConfigSchema, { ...complete, MEILI_API_KEY: 'fixture-meili-key' }),
+    ).toThrow(/MEILI_URL: required, not set/u);
+  });
+
+  it.each([
+    'ftp://meilisearch:7700',
+    'http:meilisearch',
+    'https://fixture-username:fixture-password@meilisearch',
+    'https://meilisearch?key=fixture-query',
+    'https://meilisearch#fixture-fragment',
+  ])('refuses an invalid Meilisearch endpoint with a generic diagnostic', (endpoint) => {
+    const load = (): void => {
+      loadConfig(appConfigSchema, {
+        ...complete,
+        MEILI_URL: endpoint,
+        MEILI_API_KEY: 'fixture-meili-key',
+      });
+    };
+
+    expect(load).toThrow(
+      /^Invalid configuration:\n- MEILI_URL: Expected a Meilisearch HTTP\(S\) URL without credentials, query or fragment\.$/u,
+    );
+  });
+
+  it('refuses an invalid Meilisearch API key without printing it', () => {
+    const load = (): void => {
+      loadConfig(appConfigSchema, {
+        ...complete,
+        MEILI_URL: 'http://meilisearch:7700',
+        MEILI_API_KEY: 'fixture-key\nwith-a-break',
+      });
+    };
+
+    expect(load).toThrow(
+      /^Invalid configuration:\n- MEILI_API_KEY: Expected a Meilisearch API key made of visible ASCII characters\.$/u,
+    );
   });
 
   it('refuses to start without the database, the broker, the audience or the trusted issuers', () => {

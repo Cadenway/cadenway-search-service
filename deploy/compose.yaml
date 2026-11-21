@@ -4,14 +4,16 @@
 #
 # Internal service: no Traefik label, no published port. Secret values (the database URLs and the
 # NATS password) are referenced by name; they live in cadenway-ops, which documents every variable
-# below in docs/service-environment.md. A variable added here must exist on the host before the
-# release that reads it: the GitOps agent refuses a commit that leaves one unset.
+# below in docs/service-environment.md. The GitOps agent refuses a commit that leaves a required
+# variable unset.
 #
 # INTERNAL_TOKEN_TRUSTED_ISSUERS lists who may call this service: the API gateway only. The folded
 # scalar gives the service one line of JSON.
 #
-# MEILI_URL and MEILI_API_KEY reach the Meilisearch of the environment with its master key. Nothing
-# reads them until the index is wired.
+# The optional SEARCH_SERVICE_INTERNAL_TOKEN_PRIVATE_JWK enables the four signed outbound
+# connections. Their defaults use the owning services on the internal network.
+#
+# MEILI_URL and MEILI_API_KEY configure Meilisearch for the index and readiness check.
 #
 # MIGRATION_DATABASE_URL is deliberately absent: the GitOps agent of cadenway-ops hands the
 # migrator's URL to the one-off migration container only (docs/database.md there), so the running
@@ -29,6 +31,12 @@ services:
       INTERNAL_TOKEN_AUDIENCE: search-service
       INTERNAL_TOKEN_TRUSTED_ISSUERS: >-
         {"api-gateway": [${API_GATEWAY_INTERNAL_TOKEN_PUBLIC_JWKS}]}
+      INTERNAL_TOKEN_PRIVATE_JWK: ${SEARCH_SERVICE_INTERNAL_TOKEN_PRIVATE_JWK:-}
+      SEARCH_PALETTE_CURSOR_SECRET: ${SEARCH_SERVICE_PALETTE_CURSOR_SECRET:-}
+      TASK_SERVICE_URL: ${SEARCH_SERVICE_INTERNAL_TOKEN_PRIVATE_JWK:+${TASK_SERVICE_URL:-http://task-service:3013}}
+      ORGANIZATION_SERVICE_URL: ${SEARCH_SERVICE_INTERNAL_TOKEN_PRIVATE_JWK:+${ORGANIZATION_SERVICE_URL:-http://organization-service:3011}}
+      DOCUMENT_SERVICE_URL: ${SEARCH_SERVICE_INTERNAL_TOKEN_PRIVATE_JWK:+${DOCUMENT_SERVICE_URL:-http://document-service:3014}}
+      STORAGE_SERVICE_URL: ${SEARCH_SERVICE_INTERNAL_TOKEN_PRIVATE_JWK:+${STORAGE_SERVICE_URL:-http://storage-service:3015}}
       MEILI_URL: ${MEILI_URL}
       MEILI_API_KEY: ${MEILI_MASTER_KEY}
     networks:

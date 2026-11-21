@@ -12,8 +12,8 @@ runs the outbox relay (which only purges here: the service emits nothing), and i
 PostgreSQL and NATS. The one migration creates the tables of the service kit, owned by the platform
 module (`src/modules/platform/MODULE.md`). No business code, route or handler exists yet:
 `@cadenway/contracts` defines none of the events this service indexes, so nothing is consumed. The
-target architecture in this guide is what they must follow. Meilisearch is not connected yet:
-`MEILI_URL` and `MEILI_API_KEY` are set but read by nothing.
+target architecture in this guide is what they must follow. The service validates the optional
+Meilisearch connection settings at startup.
 
 The commands below are the documented workflow. Inspect the repository's actual manifests and files before running them, and report unavailable checks rather than inventing replacements. Run Git, pnpm, build, and test commands with this repository as the working directory, never from the parent workspace.
 
@@ -93,7 +93,7 @@ each value comes from on a server.
 | `OTEL_EXPORTER_OTLP_ENDPOINT`         | `src/telemetry.ts`    | OTLP over HTTP; unset, nothing leaves the process                                                                                                           |
 | `NATS_URL`                            | The service           | `nats://` URL of the broker                                                                                                                                 |
 | `NATS_USER`, `NATS_PASSWORD`          | The service           | User `search` and its password; inbox prefix `_INBOX.search`                                                                                                |
-| `MEILI_URL`, `MEILI_API_KEY`          | Nothing yet           | Meilisearch and its key; the Meilisearch of `compose.dev.yaml` locally, read once the index is wired                                                        |
+| `MEILI_URL`, `MEILI_API_KEY`          | The service           | Meilisearch HTTP(S) URL and API key. Set both to configure Meilisearch or leave both unset. The example points to `compose.dev.yaml`.                       |
 
 ### Calling the service locally
 
