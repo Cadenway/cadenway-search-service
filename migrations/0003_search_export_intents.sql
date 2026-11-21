@@ -1,0 +1,3 @@
+ALTER TABLE "search_export_checkpoints" ADD COLUMN "write_token" uuid;--> statement-breakpoint
+ALTER TABLE "search_export_checkpoints" ADD COLUMN "write_deadline" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "search_export_checkpoints" ADD CONSTRAINT "search_export_checkpoints_write_check" CHECK (("search_export_checkpoints"."write_token" is null and "search_export_checkpoints"."write_deadline" is null) or ("search_export_checkpoints"."write_token" is not null and "search_export_checkpoints"."write_deadline" is not null and "search_export_checkpoints"."organization_id" is not null and not "search_export_checkpoints"."complete"));

@@ -1,3 +1,5 @@
+import type { StatusKey } from '@cadenway/contracts';
+
 import type { MeilisearchProjectionKey } from './meilisearch-projection-key.js';
 
 /** Derived lookup metadata and searchable text stored in a generation index. */
@@ -11,6 +13,9 @@ export interface MeilisearchIndexDocument extends MeilisearchProjectionKey {
 
   /** Searchable label from the source. */
   readonly title: string;
+
+  /** Current published status key, required for tasks and absent for other kinds. */
+  readonly status?: StatusKey;
 
   /** Searchable text excluded from displayed attributes. */
   readonly text?: string;

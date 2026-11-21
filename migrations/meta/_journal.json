@@ -8,6 +8,34 @@
       "when": 1794753079521,
       "tag": "0000_platform_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1795216332485,
+      "tag": "0001_search_rebuild_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795217693333,
+      "tag": "0002_search_refresh_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795218185340,
+      "tag": "0003_search_export_intents",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795218859828,
+      "tag": "0004_search_parent_checkpoints",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+
+import { literalSearchOrderKey } from '../../../domain/policies/literal-search/literal-search-order.policy.js';
+import { buildLiteralSearchIndexTerms } from '../../../domain/policies/literal-search/literal-search.policy.js';
 
 import { MeilisearchIndexAdapter } from './meilisearch-index.adapter.js';
 import type { MeilisearchIndexDocument } from './meilisearch-index-document.js';
@@ -13,7 +17,10 @@ const task: MeilisearchIndexDocument = {
   sourceId: 'CAD-482',
   title: 'Sprint 14',
   version: 1,
+  status: 'progress',
 };
+const listId = '01938f6e-0000-7000-8000-000000000001';
+const sortFields = ['kindRank', 'orderHigh', 'orderMiddle', 'orderLow'];
 const engineIndex = {
   uid: indexUid,
   primaryKey: 'projectionId',
@@ -45,9 +52,13 @@ function result(
   return Response.json({ uid, indexUid, status, type, error });
 }
 
-function jsonBody(init: RequestInit | undefined): unknown {
+function requestBody(init: RequestInit | undefined): string {
   if (typeof init?.body !== 'string') throw new Error('Expected a JSON request body.');
-  return JSON.parse(init.body) as unknown;
+  return init.body;
+}
+
+function jsonBody(init: RequestInit | undefined): unknown {
+  return JSON.parse(requestBody(init)) as unknown;
 }
 
 describe('MeilisearchIndexAdapter', () => {
@@ -113,7 +124,7 @@ describe('MeilisearchIndexAdapter', () => {
       .mockResolvedValueOnce(result(2, 'settingsUpdate'))
       .mockResolvedValueOnce(Response.json(engineIndex));
 
-    await adapter.createGeneration(indexUid);
+    await expect(adapter.createGeneration(indexUid)).resolves.toBe(engineIndex.createdAt);
 
     expect(transport.mock.calls.map(([url]) => url)).toEqual(
       [
@@ -136,7 +147,15 @@ describe('MeilisearchIndexAdapter', () => {
     const settings = transport.mock.calls[4]?.[1];
     expect(settings?.method).toBe('PATCH');
     expect(jsonBody(settings)).toMatchObject({
-      filterableAttributes: ['organizationId'],
+      filterableAttributes: [
+        'organizationId',
+        'kind',
+        'literalTerms',
+        'listId',
+        'spaceId',
+        ...sortFields,
+      ],
+      sortableAttributes: sortFields,
       searchableAttributes: ['title', 'sourceId', 'taskKey', 'text'],
       displayedAttributes: [
         'projectionId',
@@ -148,6 +167,8 @@ describe('MeilisearchIndexAdapter', () => {
         'listId',
         'spaceId',
         'taskKey',
+        'status',
+        ...sortFields,
       ],
     });
     expect(transport.mock.calls.every(([, init]) => init?.signal === request?.[1]?.signal)).toBe(
@@ -155,20 +176,31 @@ describe('MeilisearchIndexAdapter', () => {
     );
   });
 
-  it('recovers a retry after creation when the existing index has the expected primary key', async () => {
+  it('refuses to adopt an existing generation by UID even when its primary key could match', async () => {
     const { adapter, transport } = setup();
     transport
       .mockResolvedValueOnce(queued(1, 'indexCreation'))
-      .mockResolvedValueOnce(result(1, 'indexCreation', 'failed', { code: 'index_already_exists' }))
+      .mockResolvedValueOnce(
+        result(1, 'indexCreation', 'failed', { code: 'index_already_exists' }),
+      );
+
+    await expect(adapter.createGeneration(indexUid)).rejects.toMatchObject({
+      code: 'index-already-exists',
+    });
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads the exact engine identity without caching across calls', async () => {
+    const { adapter, transport } = setup();
+    const replacement = { ...engineIndex, createdAt: '2026-11-20T19:23:41.749013Z' };
+    transport
       .mockResolvedValueOnce(Response.json(engineIndex))
-      .mockResolvedValueOnce(queued(2, 'settingsUpdate'))
-      .mockResolvedValueOnce(result(2, 'settingsUpdate'))
-      .mockResolvedValueOnce(Response.json(engineIndex));
+      .mockResolvedValueOnce(Response.json(replacement));
 
-    await adapter.createGeneration(indexUid);
-
-    expect(transport.mock.calls[2]?.[0]).toEqual(new URL(`${baseUrl}/indexes/${indexUid}`));
-    expect(transport.mock.calls[3]?.[1]?.method).toBe('PATCH');
+    await expect(adapter.readGenerationIdentity(indexUid)).resolves.toBe(engineIndex.createdAt);
+    await expect(adapter.readGenerationIdentity(indexUid)).resolves.toBe(replacement.createdAt);
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(transport.mock.calls[1]?.[1]).toMatchObject({ method: 'GET', cache: 'no-store' });
   });
 
   it('replaces full projections and deletes only keys scoped to the caller organization', async () => {
@@ -183,8 +215,8 @@ describe('MeilisearchIndexAdapter', () => {
       .mockResolvedValueOnce(result(2, 'documentDeletion'))
       .mockResolvedValueOnce(Response.json(engineIndex));
 
-    await adapter.upsertDocuments(indexUid, organizationId, [task]);
-    await adapter.deleteDocuments(indexUid, otherOrganizationId, [
+    await adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [task]);
+    await adapter.deleteDocuments(indexUid, engineIndex.createdAt, otherOrganizationId, [
       { kind: 'task', sourceId: 'CAD-482' },
     ]);
 
@@ -192,20 +224,148 @@ describe('MeilisearchIndexAdapter', () => {
     expect(upsert?.[0]).toEqual(new URL(`${baseUrl}/indexes/${indexUid}/documents`));
     expect(upsert?.[1]?.method).toBe('POST');
     expect(jsonBody(upsert?.[1])).toEqual([
-      { ...task, projectionId: `${organizationId}_task_CAD-482` },
+      {
+        ...task,
+        projectionId: `${organizationId}_task_CAD-482`,
+        literalTerms: buildLiteralSearchIndexTerms(task.title, task.sourceId),
+        kindRank: 0,
+        orderHigh: 73_947_595_748_408,
+        orderMiddle: 54_975_581_388_800,
+        orderLow: 0,
+      },
     ]);
     const deletion = transport.mock.calls[5];
     expect(deletion?.[0]).toEqual(new URL(`${baseUrl}/indexes/${indexUid}/documents/delete-batch`));
     expect(deletion?.[1]?.body).toBe(JSON.stringify([`${otherOrganizationId}_task_CAD-482`]));
   });
 
+  it('uses the list title alone for palette terms and only indexes the published task status', async () => {
+    const { adapter, transport } = setup();
+    transport
+      .mockResolvedValueOnce(Response.json(engineIndex))
+      .mockResolvedValueOnce(queued(1, 'documentAdditionOrUpdate'))
+      .mockResolvedValueOnce(result(1, 'documentAdditionOrUpdate'))
+      .mockResolvedValueOnce(Response.json(engineIndex));
+    const list = {
+      organizationId,
+      sourceId: listId,
+      kind: 'list',
+      title: 'Écran',
+      version: 1,
+    } as const;
+    const taskWithoutStatus = { ...task, status: undefined };
+    await expect(
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [taskWithoutStatus]),
+    ).rejects.toMatchObject({ code: 'invalid-request' });
+    await expect(
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [
+        { ...list, status: 'progress' },
+      ]),
+    ).rejects.toMatchObject({ code: 'invalid-request' });
+    const invalidTask = { ...task, status: 'invented' } as unknown as MeilisearchIndexDocument;
+    await expect(
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [invalidTask]),
+    ).rejects.toMatchObject({ code: 'invalid-request' });
+
+    const document = { ...list, kind: 'document' } as const;
+    await adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [
+      list,
+      document,
+    ]);
+    const [kindRank, orderHigh, orderMiddle, orderLow] = literalSearchOrderKey('list', listId);
+    expect(jsonBody(transport.mock.calls[1]?.[1])).toEqual([
+      {
+        ...list,
+        projectionId: `${organizationId}_list_${listId}`,
+        literalTerms: buildLiteralSearchIndexTerms(list.title),
+        kindRank,
+        orderHigh,
+        orderMiddle,
+        orderLow,
+      },
+      { ...document, projectionId: `${organizationId}_document_${listId}` },
+    ]);
+    expect(transport).toHaveBeenCalledTimes(4);
+  });
+
+  it('splits Unicode palette documents into wire-bounded batches and confirms each mutation under one deadline', async () => {
+    const { adapter, transport } = setup();
+    const title = Array.from({ length: 300 }, (_, i) => String.fromCodePoint(0x100000 + i)).join(
+      '',
+    );
+    const records = Array.from({ length: 100 }, (_, i) => ({
+      ...task,
+      sourceId: `CAD-${String(i + 1)}`,
+      title,
+    }));
+    let nextUid = 1;
+    transport.mockImplementation((url, init) => {
+      if (init?.method === 'POST') {
+        return Promise.resolve(queued(nextUid++, 'documentAdditionOrUpdate'));
+      }
+      const path = new URL(url instanceof Request ? url.url : url).pathname;
+      const uid = /\/tasks\/(\d+)$/u.exec(path)?.[1];
+      return Promise.resolve(
+        uid === undefined
+          ? Response.json(engineIndex)
+          : result(Number(uid), 'documentAdditionOrUpdate'),
+      );
+    });
+
+    await adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, records);
+
+    const payloads = transport.mock.calls.filter(([, init]) => init?.method === 'POST');
+    expect(payloads.length).toBeGreaterThan(1);
+    const posted = z.array(z.object({ sourceId: z.string(), title: z.string() }));
+    expect(
+      payloads.flatMap(([, init]) => {
+        expect(Buffer.byteLength(requestBody(init), 'utf8')).toBeLessThanOrEqual(1_048_576);
+        return posted.parse(jsonBody(init));
+      }),
+    ).toEqual(records.map(({ sourceId, title }) => ({ sourceId, title })));
+    expect(transport.mock.calls.map(([, init]) => init?.method)).toEqual(
+      payloads.flatMap(() => ['GET', 'POST', 'GET', 'GET']),
+    );
+    expect(new Set(transport.mock.calls.map(([, init]) => init?.signal)).size).toBe(1);
+  });
+
+  it('stops before the next sub-batch when the verified generation is replaced', async () => {
+    const { adapter, transport } = setup();
+    const replacement = { ...engineIndex, createdAt: '2026-11-20T19:23:41.749013Z' };
+    transport
+      .mockResolvedValueOnce(Response.json(engineIndex))
+      .mockResolvedValueOnce(queued(1, 'documentAdditionOrUpdate'))
+      .mockResolvedValueOnce(result(1, 'documentAdditionOrUpdate'))
+      .mockResolvedValueOnce(Response.json(engineIndex))
+      .mockResolvedValueOnce(Response.json(replacement));
+    const records = [1, 2, 3].map((n) => ({
+      organizationId,
+      kind: 'document' as const,
+      sourceId: `01938f6e-0000-7000-8000-00000000000${String(n)}`,
+      version: 1,
+      title: 'Sprint 14',
+      text: '🔎'.repeat(100_000),
+    }));
+
+    await expect(
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, records),
+    ).rejects.toMatchObject({ code: 'index-replaced' });
+    expect(transport.mock.calls.map(([, init]) => init?.method)).toEqual([
+      'GET',
+      'POST',
+      'GET',
+      'GET',
+      'GET',
+    ]);
+  });
+
   it('stops before an upsert can recreate an already missing generation', async () => {
     const { adapter, transport } = setup();
     transport.mockResolvedValueOnce(Response.json({ code: 'index_not_found' }, { status: 404 }));
 
-    await expect(adapter.upsertDocuments(indexUid, organizationId, [task])).rejects.toMatchObject({
-      code: 'index-not-found',
-    });
+    await expect(
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [task]),
+    ).rejects.toMatchObject({ code: 'index-not-found' });
     expect(transport).toHaveBeenCalledOnce();
     expect(transport.mock.calls[0]?.[1]?.method).toBe('GET');
   });
@@ -220,44 +380,70 @@ describe('MeilisearchIndexAdapter', () => {
         Response.json({ ...engineIndex, createdAt: '2026-11-20T19:23:41.749013Z' }),
       );
 
-    await expect(adapter.upsertDocuments(indexUid, organizationId, [task])).rejects.toMatchObject({
-      code: 'index-replaced',
-    });
+    await expect(
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [task]),
+    ).rejects.toMatchObject({ code: 'index-replaced' });
     expect(transport).toHaveBeenCalledTimes(4);
+  });
+
+  it('checks the persisted creation timestamp before either mutation or an empty batch', async () => {
+    const { adapter, transport } = setup();
+    const replacement = { ...engineIndex, createdAt: '2026-11-20T19:23:41.749013Z' };
+    transport.mockImplementation(() => Promise.resolve(Response.json(replacement)));
+    const keys = [{ kind: task.kind, sourceId: task.sourceId }];
+
+    await expect(
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [task]),
+    ).rejects.toMatchObject({ code: 'index-replaced' });
+    await expect(
+      adapter.deleteDocuments(indexUid, engineIndex.createdAt, organizationId, keys),
+    ).rejects.toMatchObject({ code: 'index-replaced' });
+    await expect(
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, []),
+    ).rejects.toMatchObject({ code: 'index-replaced' });
+    await expect(
+      adapter.deleteDocuments(indexUid, engineIndex.createdAt, organizationId, []),
+    ).rejects.toMatchObject({ code: 'index-replaced' });
+    await expect(
+      adapter.upsertDocuments(indexUid, replacement.createdAt, organizationId, []),
+    ).resolves.toBeUndefined();
+    expect(transport).toHaveBeenCalledTimes(5);
+    expect(transport.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
   });
 
   it('rejects mixed tenants, duplicate keys, count and byte overflow before contacting the engine', async () => {
     const { adapter, transport } = setup();
     await expect(
-      adapter.upsertDocuments(indexUid, organizationId, [
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [
         { ...task, organizationId: otherOrganizationId },
       ]),
     ).rejects.toMatchObject({ code: 'invalid-request' });
     await expect(
-      adapter.upsertDocuments(indexUid, organizationId, [task, task]),
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [task, task]),
     ).rejects.toMatchObject({ code: 'invalid-request' });
     await expect(
       adapter.deleteDocuments(
         indexUid,
+        engineIndex.createdAt,
         organizationId,
         Array.from({ length: 101 }, (_, i) => ({ kind: 'task', sourceId: `CAD-${String(i)}` })),
       ),
     ).rejects.toMatchObject({ code: 'batch-too-large' });
-    const largeText = '🔎'.repeat(100_000);
+    const largeText = '\u0000'.repeat(200_000);
     await expect(
-      adapter.upsertDocuments(
-        indexUid,
-        organizationId,
-        Array.from({ length: 3 }, (_, i) => ({
-          ...task,
-          sourceId: `CAD-${String(i)}`,
-          text: largeText,
-        })),
-      ),
+      adapter.upsertDocuments(indexUid, engineIndex.createdAt, organizationId, [
+        { ...task, text: largeText },
+      ]),
     ).rejects.toMatchObject({ code: 'batch-too-large' });
     await expect(adapter.createGeneration('../tasks')).rejects.toMatchObject({
       code: 'invalid-request',
     });
+    await expect(adapter.readGenerationIdentity('../tasks')).rejects.toMatchObject({
+      code: 'invalid-request',
+    });
+    await expect(
+      adapter.deleteDocuments(indexUid, 'not-a-timestamp', organizationId, []),
+    ).rejects.toMatchObject({ code: 'invalid-request' });
     expect(transport).not.toHaveBeenCalled();
   });
 

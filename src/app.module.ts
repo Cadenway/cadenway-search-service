@@ -6,7 +6,6 @@ import {
   MessagingModule,
   messagingHealthIndicator,
 } from '@cadenway/nest-messaging';
-import { OutboxModule } from '@cadenway/nest-messaging/outbox';
 import { Module } from '@nestjs/common';
 
 import { appConfigSchema } from './config/app-config.js';
@@ -32,14 +31,9 @@ import { SearchIndexModule } from './modules/search-index/search-index.module.js
  * - `MessagingModule`: the NATS connection of the `search` user, with the inbox prefix
  *   `_INBOX.search` the broker requires. The creation waits for the first connection, then
  *   checks that the `EVENTS` stream exists: cadenway-ops creates the streams
- *   (`manageStreams: false`), and only notification-service runs the dead-letter worker. The
- *   service never publishes (the `search` user may publish no event) and consumes nothing yet:
- *   `@cadenway/contracts` defines none of the events it indexes.
- * - `OutboxModule`: the outbox writer, the PostgreSQL deduplicator and the relay, which polls
- *   `outbox_events` every second in a system transaction and publishes the pending rows. It runs in
- *   every replica; `for update skip locked` keeps two of them from publishing the same row. Nothing
- *   appends to the outbox of this service, but the relay stays on: every hour it purges the
- *   processed ids that the deduplicator records for the handlers, after 14 days.
+ *   (`manageStreams: false`), and only notification-service runs the dead-letter worker. Search
+ *   consumes exact owner events when the authority and index are configured. Its own receipt
+ *   commits with the refresh queue in a system transaction before the kit acknowledges delivery.
  * - `HealthModule`: `GET /health/live` answers as soon as the process runs; `GET /health/ready`
  *   answers 503 while PostgreSQL or NATS does not answer within 1 second, and from the start of a
  *   shutdown. Both routes are exempt from the internal token, every other route requires it.
@@ -76,7 +70,6 @@ import { SearchIndexModule } from './modules/search-index/search-index.module.js
         deadLetterWorker: false,
       }),
     }),
-    OutboxModule.forRoot(),
     HealthModule.forRootAsync({
       inject: [DATABASE_POOL, MessagingConnection, CONFIG],
       useFactory: (pool: PostgresProbe, connection: MessagingConnection, config: AppConfig) => {
