@@ -47,6 +47,8 @@ export const searchIndexGenerations = pgTable(
     certifiedBrokerFrontier: bigint('certified_broker_frontier', { mode: 'number' }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    purgeAfter: timestamp('purge_after', { withTimezone: true }),
+    purgedAt: timestamp('purged_at', { withTimezone: true }),
   },
   (table) => [
     uniqueIndex('search_index_generations_uid_unique').on(table.indexUid),
@@ -56,6 +58,11 @@ export const searchIndexGenerations = pgTable(
     uniqueIndex('search_index_generations_active_unique')
       .on(table.status)
       .where(sql`${table.status} = 'active'`),
+    index('search_index_generations_purge_index')
+      .on(table.updatedAt, table.id)
+      .where(
+        sql`${table.status} in ('retired', 'abandoned') and ${table.engineCreatedAt} is not null and ${table.purgedAt} is null`,
+      ),
     check(
       'search_index_generations_uid_length_check',
       sql`length(${table.indexUid}) between 1 and 512`,

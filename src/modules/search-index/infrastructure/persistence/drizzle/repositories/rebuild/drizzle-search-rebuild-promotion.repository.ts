@@ -107,7 +107,7 @@ export class DrizzleSearchRebuildPromotionRepository implements SearchRebuildPro
     }
     await this.db
       .update(searchIndexGenerations)
-      .set({ status: 'retired', updatedAt: new Date() })
+      .set({ status: 'retired', updatedAt: sql`clock_timestamp()` })
       .where(eq(searchIndexGenerations.status, 'active'));
     const activated = await this.db
       .update(searchIndexGenerations)

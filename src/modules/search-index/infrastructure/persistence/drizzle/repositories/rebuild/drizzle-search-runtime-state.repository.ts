@@ -7,6 +7,7 @@ import { and, asc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 
 import type { SearchRebuildGeneration } from '../../../../../application/models/rebuild/search-rebuild-generation.model.js';
 import type { SearchRebuildRuntime } from '../../../../../application/models/rebuild/search-rebuild-runtime.model.js';
+import type { SearchPrunableGeneration } from '../../../../../application/models/rebuild/search-prunable-generation.model.js';
 import type { SearchRebuildRuntimePort } from '../../../../../application/ports/outbound/persistence/rebuild/search-rebuild-runtime.port.js';
 import {
   searchExportCheckpoints,
@@ -129,6 +130,61 @@ export class DrizzleSearchRuntimeStateRepository implements SearchRebuildRuntime
         )
         .returning({ eventId: searchRefreshReceipts.eventId });
       return removed.length;
+    });
+  }
+
+  /** Claims a bound inactive generation after a one-hour drain, with a bounded retry delay. */
+  public claimExpiredGeneration(): Promise<SearchPrunableGeneration | null> {
+    return this.system.run(async ({ db }) => {
+      const [row] = await db
+        .select({
+          id: searchIndexGenerations.id,
+          indexUid: searchIndexGenerations.indexUid,
+          engineCreatedAt: searchIndexGenerations.engineCreatedAt,
+        })
+        .from(searchIndexGenerations)
+        .where(
+          and(
+            sql`${searchIndexGenerations.status} in ('retired', 'abandoned')`,
+            isNotNull(searchIndexGenerations.engineCreatedAt),
+            sql`${searchIndexGenerations.purgedAt} is null`,
+            sql`${searchIndexGenerations.updatedAt} < clock_timestamp() - interval '1 hour'`,
+            sql`(${searchIndexGenerations.purgeAfter} is null or ${searchIndexGenerations.purgeAfter} <= clock_timestamp())`,
+          ),
+        )
+        .orderBy(
+          asc(
+            sql`coalesce(${searchIndexGenerations.purgeAfter}, ${searchIndexGenerations.updatedAt})`,
+          ),
+          asc(searchIndexGenerations.id),
+        )
+        .limit(1)
+        .for('update', { skipLocked: true });
+      if (row === undefined) return null;
+      if (row.engineCreatedAt === null) throw new Error('Search generation identity missing.');
+      await db
+        .update(searchIndexGenerations)
+        .set({ purgeAfter: sql`clock_timestamp() + interval '5 minutes'` })
+        .where(eq(searchIndexGenerations.id, row.id));
+      return { ...row, engineCreatedAt: row.engineCreatedAt };
+    });
+  }
+
+  /** Marks a confirmed deletion while preserving the generation UID and identity audit record. */
+  public markGenerationPurged(generation: SearchPrunableGeneration): Promise<void> {
+    return this.system.run(async ({ db }) => {
+      await db
+        .update(searchIndexGenerations)
+        .set({ purgedAt: sql`clock_timestamp()`, purgeAfter: null })
+        .where(
+          and(
+            eq(searchIndexGenerations.id, generation.id),
+            eq(searchIndexGenerations.indexUid, generation.indexUid),
+            eq(searchIndexGenerations.engineCreatedAt, generation.engineCreatedAt),
+            sql`${searchIndexGenerations.status} in ('retired', 'abandoned')`,
+            sql`${searchIndexGenerations.purgedAt} is null`,
+          ),
+        );
     });
   }
   // #endregion

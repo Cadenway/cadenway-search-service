@@ -9,7 +9,7 @@ import { SearchPalette } from './search-palette.use-case.js';
 
 const membership = { memberId: 'member-1', role: 'member' as const, version: 1 };
 const input = { organizationId: 'org-1', userId: 'user-1', query: 'SSO', limit: 1 };
-const task = (id: string): PaletteCandidate => ({
+const task = (id: string): Extract<PaletteCandidate, { kind: 'task' }> => ({
   kind: 'task',
   id,
   name: 'Connexion SSO',
@@ -99,6 +99,78 @@ describe('SearchPalette', () => {
     });
   });
 
+  it('skips authority lookup for nonmatching candidates and continues after their raw position', async () => {
+    const first = { ...task('CAD-1'), name: 'Other task' };
+    const last = { ...task('CAD-2'), name: 'Another task' };
+    const { search, read, resolveAccess } = fixture([]);
+    read
+      .mockResolvedValueOnce({ generation: 'gen-1', items: [first, last], hasMore: true })
+      .mockResolvedValueOnce({ generation: 'gen-1', items: [task('CAD-3')], hasMore: false });
+
+    expect(await search.execute(input)).toEqual({
+      kind: 'ok',
+      items: [{ kind: 'task', taskKey: 'CAD-3', name: 'Connexion SSO', status: 'progress' }],
+      nextCursor: null,
+    });
+    expect(read.mock.calls[1]?.[0]).toMatchObject({ after: last, generation: 'gen-1' });
+    expect(resolveAccess.mock.calls.map((call) => call[2].candidates)).toEqual([
+      [{ kind: 'task', id: 'CAD-3' }],
+      [{ kind: 'task', id: 'CAD-3' }],
+    ]);
+  });
+
+  it('authorizes only literal matches in a mixed page and preserves the visible cursor', async () => {
+    const { search, resolveAccess, encode } = fixture([
+      { ...task('CAD-1'), name: 'Other task' },
+      task('CAD-2'),
+      { ...task('CAD-3'), name: 'Another task' },
+      task('CAD-4'),
+    ]);
+
+    expect(await search.execute(input)).toEqual({
+      kind: 'ok',
+      items: [{ kind: 'task', taskKey: 'CAD-2', name: 'Connexion SSO', status: 'progress' }],
+      nextCursor: 'sealed',
+    });
+    expect(resolveAccess.mock.calls.map((call) => call[2].candidates)).toEqual([
+      [
+        { kind: 'task', id: 'CAD-2' },
+        { kind: 'task', id: 'CAD-4' },
+      ],
+      [
+        { kind: 'task', id: 'CAD-2' },
+        { kind: 'task', id: 'CAD-4' },
+      ],
+    ]);
+    expect(encode).toHaveBeenCalledWith({
+      userId: input.userId,
+      organizationId: input.organizationId,
+      normalizedQuery: 'sso',
+      after: { kind: 'task', id: 'CAD-2' },
+    });
+  });
+
+  it('checks Task membership when no candidates match the literal query', async () => {
+    const { search, resolveAccess, getMembership } = fixture([
+      { ...task('CAD-1'), name: 'Other task' },
+    ]);
+
+    expect(await search.execute(input)).toEqual({ kind: 'ok', items: [], nextCursor: null });
+    expect(resolveAccess).toHaveBeenCalledTimes(1);
+    expect(resolveAccess.mock.calls[0]?.[2].candidates).toEqual([]);
+    expect(getMembership).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects out-of-order candidates even when they do not match the query', async () => {
+    const { search, resolveAccess } = fixture([
+      { ...task('CAD-2'), name: 'Other task' },
+      { ...task('CAD-1'), name: 'Another task' },
+    ]);
+
+    expect(await search.execute(input)).toEqual({ kind: 'unavailable' });
+    expect(resolveAccess).not.toHaveBeenCalled();
+  });
+
   it('rejects duplicated or out-of-order authority evidence', async () => {
     const { search, resolveAccess } = fixture([task('CAD-1'), task('CAD-2')]);
     resolveAccess.mockResolvedValue({ results: [proof('CAD-2'), proof('CAD-1')] });
@@ -124,6 +196,125 @@ describe('SearchPalette', () => {
     expect(getMembership.mock.invocationCallOrder[1]).toBeGreaterThan(
       resolveAccess.mock.invocationCallOrder[3] ?? 0,
     );
+  });
+
+  it('finds visible matches after 5,001 hidden candidates while the request budget remains', async () => {
+    const ordered = Array.from({ length: 5003 }, (_, index) => `CAD-${String(index + 1)}`)
+      .sort()
+      .map(task);
+    const firstVisible = ordered[5001];
+    const secondVisible = ordered[5002];
+    if (firstVisible === undefined || secondVisible === undefined)
+      throw new Error('Invalid fixture');
+    const visibleIds = new Set([firstVisible.id, secondVisible.id]);
+    const { search, read, resolveAccess, encode, getMembership } = fixture([]);
+    read.mockImplementation(({ after }) => {
+      const start = after === null ? 0 : ordered.findIndex((item) => item.id === after.id) + 1;
+      const items = ordered.slice(start, start + 100);
+      return Promise.resolve({
+        generation: 'gen-1',
+        items,
+        hasMore: start + items.length < ordered.length,
+      });
+    });
+    resolveAccess.mockImplementation((_organization, _user, lookup) =>
+      Promise.resolve({
+        results: lookup.candidates
+          .filter((candidate) => visibleIds.has(candidate.id))
+          .map((candidate) => proof(candidate.id)),
+      }),
+    );
+
+    const result = await search.execute({ ...input, signal: new AbortController().signal });
+
+    expect(result).toEqual({
+      kind: 'ok',
+      items: [
+        {
+          kind: 'task',
+          taskKey: firstVisible.id,
+          name: firstVisible.name,
+          status: firstVisible.status,
+        },
+      ],
+      nextCursor: 'sealed',
+    });
+    expect(read).toHaveBeenCalledTimes(51);
+    expect(encode).toHaveBeenCalledWith({
+      userId: input.userId,
+      organizationId: input.organizationId,
+      normalizedQuery: 'sso',
+      after: { kind: 'task', id: firstVisible.id },
+    });
+    expect(resolveAccess.mock.calls.at(-1)?.[2].candidates).toEqual([
+      { kind: 'task', id: firstVisible.id },
+      { kind: 'task', id: secondVisible.id },
+    ]);
+    expect(getMembership).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops an ongoing scan when the request deadline aborts', async () => {
+    const controller = new AbortController();
+    const { search, read, encode } = fixture([]);
+    read.mockImplementation(({ after }) => {
+      if (after !== null) controller.abort();
+      return Promise.resolve({
+        generation: 'gen-1',
+        items: [task(after === null ? 'CAD-1' : 'CAD-2')],
+        hasMore: true,
+      });
+    });
+    expect(await search.execute({ ...input, signal: controller.signal })).toEqual({
+      kind: 'unavailable',
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(encode).not.toHaveBeenCalled();
+  });
+
+  it('bounds a direct caller even when its supplied signal never aborts', async () => {
+    const { search, read, resolveAccess, encode } = fixture([]);
+    read.mockImplementation(
+      ({ signal }) =>
+        new Promise((resolve, reject) => {
+          if (signal === undefined) {
+            reject(new Error('The scan has no deadline'));
+            return;
+          }
+          signal.addEventListener(
+            'abort',
+            () => {
+              reject(new Error('Deadline expired'));
+            },
+            { once: true },
+          );
+        }),
+    );
+
+    expect(await search.execute({ ...input, signal: new AbortController().signal })).toEqual({
+      kind: 'unavailable',
+    });
+    expect(resolveAccess).not.toHaveBeenCalled();
+    expect(encode).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('retains a finite scan cap for internal callers without a deadline', async () => {
+    const ordered = Array.from({ length: 51 }, (_, index) => `CAD-${String(index + 1)}`)
+      .sort()
+      .map(task);
+    const { search, read, resolveAccess, encode } = fixture([]);
+    read.mockImplementation(({ after }) => {
+      const start = after === null ? 0 : ordered.findIndex((item) => item.id === after.id) + 1;
+      return Promise.resolve({
+        generation: 'gen-1',
+        items: ordered.slice(start, start + 1),
+        hasMore: true,
+      });
+    });
+    resolveAccess.mockResolvedValue({ results: [] });
+
+    expect(await search.execute(input)).toEqual({ kind: 'unavailable' });
+    expect(read).toHaveBeenCalledTimes(50);
+    expect(encode).not.toHaveBeenCalled();
   });
 
   it('fails closed if the membership changes during the request', async () => {

@@ -15,6 +15,7 @@ import { BindSearchGeneration } from '../../../../application/use-cases/commands
 import { ClaimSearchExportPage } from '../../../../application/use-cases/commands/rebuild/claim-search-export-page/claim-search-export-page.use-case.js';
 import { IndexSearchExportPage } from '../../../../application/use-cases/commands/rebuild/index-search-export-page/index-search-export-page.use-case.js';
 import { PromoteSearchRebuild } from '../../../../application/use-cases/commands/rebuild/promote-search-rebuild/promote-search-rebuild.use-case.js';
+import { PruneSearchGeneration } from '../../../../application/use-cases/commands/rebuild/prune-search-generation/prune-search-generation.use-case.js';
 import { RebuildSearchIndexStep } from '../../../../application/use-cases/commands/rebuild/rebuild-search-index-step/rebuild-search-index-step.use-case.js';
 import { ReconcileSearchParentPage } from '../../../../application/use-cases/commands/rebuild/reconcile-search-parent-page/reconcile-search-parent-page.use-case.js';
 import { RecordSearchExportPage } from '../../../../application/use-cases/commands/rebuild/record-search-export-page/record-search-export-page.use-case.js';
@@ -52,6 +53,9 @@ class SearchRebuildLoop implements OnApplicationBootstrap, BeforeApplicationShut
   /** Earliest time another receipt cleanup batch may run. */
   private nextReceiptSweepAt = 0;
 
+  /** Earliest time another generation purge may run. */
+  private nextGenerationSweepAt = 0;
+
   /** Earliest time to sample the broker identities of the active generation again. */
   private nextActiveBrokerCheckAt = 0;
 
@@ -63,17 +67,18 @@ class SearchRebuildLoop implements OnApplicationBootstrap, BeforeApplicationShut
   // #endregion
 
   // #region Constructor
-  /** Receives the coordinator when all source and engine connections are configured. */
+  /** Receives the rebuild coordinator and engine-backed maintenance when configured. */
   public constructor(
     private readonly step: RebuildSearchIndexStep | null,
     private readonly maintenance?: Pick<DrizzleSearchRuntimeStateRepository, 'pruneReceipts'>,
+    private readonly pruneGeneration?: PruneSearchGeneration,
   ) {}
   // #endregion
 
   // #region Methods
   /** Starts after the application has initialized its subscriptions. */
   public onApplicationBootstrap(): void {
-    if (this.step !== null) this.schedule(this.step, 100);
+    if (this.step !== null || this.pruneGeneration !== undefined) this.schedule(100);
   }
 
   /** Stops new work and cancels external calls of the current step. */
@@ -83,15 +88,15 @@ class SearchRebuildLoop implements OnApplicationBootstrap, BeforeApplicationShut
     await this.inFlight;
   }
 
-  private schedule(step: RebuildSearchIndexStep, delay: number): void {
+  private schedule(delay: number): void {
     if (this.shutdown.signal.aborted) return;
     this.timer = setTimeout(() => {
-      this.inFlight = this.run(step);
+      this.inFlight = this.run();
     }, delay);
     this.timer.unref();
   }
 
-  private async run(step: RebuildSearchIndexStep): Promise<void> {
+  private async run(): Promise<void> {
     let delay = 1_000;
     try {
       const now = new Date();
@@ -101,10 +106,25 @@ class SearchRebuildLoop implements OnApplicationBootstrap, BeforeApplicationShut
           this.nextReceiptSweepAt = now.getTime() + 1_000;
         }
       }
+      if (this.pruneGeneration && now.getTime() >= this.nextGenerationSweepAt) {
+        this.nextGenerationSweepAt = now.getTime() + 10_000;
+        const signal = AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(5_000)]);
+        try {
+          await this.pruneGeneration.execute(signal);
+        } catch (error: unknown) {
+          if (!this.shutdown.signal.aborted) {
+            this.logger.warn({
+              msg: 'Search generation purge failed',
+              errorClass: error instanceof Error ? error.name : 'UnknownError',
+            });
+          }
+        }
+      }
+      if (this.step === null) return;
       this.serveActive = !this.serveActive;
       const checkActiveBroker = now.getTime() >= this.nextActiveBrokerCheckAt;
       if (checkActiveBroker) this.nextActiveBrokerCheckAt = now.getTime() + 30_000;
-      const result = await step.execute({
+      const result = await this.step.execute({
         generationId: randomUUID(),
         claimToken: randomUUID(),
         now,
@@ -122,7 +142,7 @@ class SearchRebuildLoop implements OnApplicationBootstrap, BeforeApplicationShut
         });
       }
     } finally {
-      this.schedule(step, delay);
+      this.schedule(delay);
     }
   }
   // #endregion
@@ -145,8 +165,10 @@ export const searchRebuildLoopProvider: FactoryProvider<SearchRebuildLoop> = {
     connection: MessagingConnection,
     consumers: EventConsumers,
   ): SearchRebuildLoop => {
-    if (engine === null || authorities === null) return new SearchRebuildLoop(null);
+    if (engine === null) return new SearchRebuildLoop(null);
     const runtime = new DrizzleSearchRuntimeStateRepository(system);
+    const pruneGeneration = new PruneSearchGeneration(runtime, engine);
+    if (authorities === null) return new SearchRebuildLoop(null, runtime, pruneGeneration);
     const generation = new DrizzleSearchGenerationUnitOfWork(system);
     const exports = new DrizzleSearchRebuildExportUnitOfWork(system);
     const refresh = new DrizzleSearchRefreshUnitOfWork(system);
@@ -219,6 +241,7 @@ export const searchRebuildLoopProvider: FactoryProvider<SearchRebuildLoop> = {
         new PromoteSearchRebuild(promotion),
       ),
       runtime,
+      pruneGeneration,
     );
   },
 };

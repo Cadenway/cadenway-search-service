@@ -96,6 +96,45 @@ describe('Meilisearch index generations', () => {
     await expect(adapter.checkHealth()).resolves.toBeUndefined();
   });
 
+  it('uses an index-scoped credential to write and retire an owned generation', async () => {
+    const provisioned = await fetchFixture('/keys', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Search test runtime',
+        actions: [
+          'search',
+          'indexes.get',
+          'indexes.create',
+          'indexes.delete',
+          'tasks.get',
+          'settings.update',
+          'documents.add',
+          'documents.delete',
+        ],
+        indexes: ['search_*'],
+        expiresAt: null,
+      }),
+    });
+    expect(provisioned.status).toBe(201);
+    const { key } = z.object({ key: z.string().min(1) }).parse(await provisioned.json());
+    const runtime = new MeilisearchIndexAdapter({ baseUrl, apiKey: key, timeoutMs: 15_000 });
+    const uid = 'search_01938f6e000070008000000000000099';
+    await runtime.checkHealth();
+    const createdAt = await runtime.createGeneration(uid);
+    await runtime.upsertDocuments(uid, createdAt, atelierNordId, [
+      { organizationId: atelierNordId, kind: 'document', sourceId, title: 'Review', version: 1 },
+    ]);
+    await expect(runtime.removeGeneration(uid, '2026-11-20T19:23:41Z')).rejects.toMatchObject({
+      code: 'index-replaced',
+    });
+    expect(await search(atelierNordId, 'Review', uid)).toEqual(['Review']);
+    await runtime.removeGeneration(uid, createdAt);
+    await expect(runtime.readGenerationIdentity(uid)).rejects.toMatchObject({
+      code: 'index-not-found',
+    });
+    await expect(runtime.removeGeneration(uid, createdAt)).resolves.toBeUndefined();
+  });
+
   it('waits for settings and keeps replacement and deletion scoped to the tenant key', async () => {
     await adapter.checkHealth();
     const createdAt = await adapter.createGeneration(indexUid);

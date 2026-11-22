@@ -1,0 +1,3 @@
+ALTER TABLE "search_index_generations" ADD COLUMN "purge_after" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "search_index_generations" ADD COLUMN "purged_at" timestamp with time zone;--> statement-breakpoint
+CREATE INDEX "search_index_generations_purge_index" ON "search_index_generations" USING btree ("updated_at","id") WHERE "search_index_generations"."status" in ('retired', 'abandoned') and "search_index_generations"."engine_created_at" is not null and "search_index_generations"."purged_at" is null;

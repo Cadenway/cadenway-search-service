@@ -110,7 +110,11 @@ interface IndexAdapterOptions {
 }
 
 type TaskType =
-  'indexCreation' | 'settingsUpdate' | 'documentAdditionOrUpdate' | 'documentDeletion';
+  | 'indexCreation'
+  | 'indexDeletion'
+  | 'settingsUpdate'
+  | 'documentAdditionOrUpdate'
+  | 'documentDeletion';
 
 const documentMutations = {
   upsert: { suffix: 'documents', type: 'documentAdditionOrUpdate' },
@@ -264,6 +268,38 @@ export class MeilisearchIndexAdapter implements PaletteCandidateReader {
     return this.withDeadline(signal, (operationSignal) =>
       this.requireGeneration(index, indexUid, operationSignal),
     );
+  }
+
+  /** Deletes only the bound physical generation or confirms that it is already absent. */
+  public async removeGeneration(
+    indexUid: string,
+    expectedCreatedAt: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (
+      !/^search_[0-9a-f]{32}$/u.test(indexUid) ||
+      !generationCreatedAt.safeParse(expectedCreatedAt).success
+    ) {
+      throw new MeilisearchIndexError('invalid-request');
+    }
+    const path = this.indexPath(indexUid);
+    await this.withDeadline(signal, async (operationSignal) => {
+      try {
+        await this.assertGeneration(path, indexUid, expectedCreatedAt, operationSignal);
+        await this.submitTask(
+          path,
+          'DELETE',
+          undefined,
+          indexUid,
+          'indexDeletion',
+          operationSignal,
+        );
+      } catch (error: unknown) {
+        if (!(error instanceof MeilisearchIndexError) || error.code !== 'index-not-found') {
+          throw error;
+        }
+      }
+    });
   }
 
   /** Reads a page, verifying both the durable pointer and the physical index around the operation. */
@@ -495,8 +531,8 @@ export class MeilisearchIndexAdapter implements PaletteCandidateReader {
 
   private async submitTask(
     path: string,
-    method: 'POST' | 'PATCH',
-    body: string,
+    method: 'POST' | 'PATCH' | 'DELETE',
+    body: string | undefined,
     indexUid: string,
     type: TaskType,
     signal: AbortSignal,
@@ -539,7 +575,7 @@ export class MeilisearchIndexAdapter implements PaletteCandidateReader {
 
   private async requestJson(
     path: string,
-    method: 'GET' | 'POST' | 'PATCH',
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     expectedStatus: 200 | 202,
     signal: AbortSignal,
     body?: string,
@@ -560,10 +596,13 @@ export class MeilisearchIndexAdapter implements PaletteCandidateReader {
       signal,
     });
     if (response.status !== expectedStatus) {
-      void response.body?.cancel().catch(() => undefined);
       if (response.status === 404 && path.startsWith('indexes/')) {
-        throw new MeilisearchIndexError('index-not-found');
+        const missing = z.object({ code: z.literal('index_not_found') });
+        if (missing.safeParse(await this.readJson(response, maxResponseBytes, signal)).success) {
+          throw new MeilisearchIndexError('index-not-found');
+        }
       }
+      void response.body?.cancel().catch(() => undefined);
       throw new MeilisearchIndexError('unavailable');
     }
     return this.readJson(response, maxBytes, signal);
