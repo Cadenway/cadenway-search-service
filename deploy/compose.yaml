@@ -13,7 +13,8 @@
 # The optional SEARCH_SERVICE_INTERNAL_TOKEN_PRIVATE_JWK enables the four signed outbound
 # connections. Their defaults use the owning services on the internal network.
 #
-# MEILI_URL and MEILI_API_KEY configure Meilisearch for the index and readiness check.
+# SEARCH_SERVICE_MEILI_API_KEY authorizes this service's operations on search_* indexes.
+# The Meilisearch master key is only used by the engine and the operator that provisions keys.
 #
 # MIGRATION_DATABASE_URL is deliberately absent: the GitOps agent of cadenway-ops hands the
 # migrator's URL to the one-off migration container only (docs/database.md there), so the running
@@ -38,7 +39,7 @@ services:
       DOCUMENT_SERVICE_URL: ${SEARCH_SERVICE_INTERNAL_TOKEN_PRIVATE_JWK:+${DOCUMENT_SERVICE_URL:-http://document-service:3014}}
       STORAGE_SERVICE_URL: ${SEARCH_SERVICE_INTERNAL_TOKEN_PRIVATE_JWK:+${STORAGE_SERVICE_URL:-http://storage-service:3015}}
       MEILI_URL: ${MEILI_URL}
-      MEILI_API_KEY: ${MEILI_MASTER_KEY}
+      MEILI_API_KEY: ${SEARCH_SERVICE_MEILI_API_KEY:-}
     networks:
       - internal
     healthcheck:

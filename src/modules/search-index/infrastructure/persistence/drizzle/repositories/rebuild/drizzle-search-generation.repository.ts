@@ -90,7 +90,7 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
   public async abandon(generationId: string): Promise<boolean> {
     const changed = await this.db
       .update(searchIndexGenerations)
-      .set({ status: 'abandoned', updatedAt: new Date() })
+      .set({ status: 'abandoned', updatedAt: sql`clock_timestamp()` })
       .where(
         and(
           eq(searchIndexGenerations.id, generationId),

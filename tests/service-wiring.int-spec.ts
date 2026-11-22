@@ -334,7 +334,7 @@ describe('search-service wiring', () => {
         tableowner: 'search_migrator',
       })),
     );
-    expect(journal.rows).toEqual([{ applied: 5 }]);
+    expect(journal.rows).toEqual([{ applied: 6 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -343,7 +343,7 @@ describe('search-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 5 }]);
+    expect(journal.rows).toEqual([{ applied: 6 }]);
   });
 
   it('upgrades an existing platform database while the old application can still use its data', async () => {
@@ -454,7 +454,7 @@ describe('search-service wiring', () => {
       const journal = await owner.query<{ applied: number }>(
         'select count(*)::int as applied from drizzle.__drizzle_migrations',
       );
-      expect(journal.rows).toEqual([{ applied: 5 }]);
+      expect(journal.rows).toEqual([{ applied: 6 }]);
       const control = await new SystemTransactionRunner(application).run((tx) =>
         tx.client.query('select id from search_rebuild_control'),
       );
@@ -578,6 +578,56 @@ describe('search-service wiring', () => {
       );
       await system.run((tx) =>
         tx.client.query('delete from search_index_generations where id = $1', [generationId]),
+      );
+    }
+  });
+
+  it('claims only drained generations with recorded engine identities and fences retries', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const runtime = new DrizzleSearchRuntimeStateRepository(system);
+    const ids = [
+      '01938f6e-0000-7000-8000-000000000050',
+      '01938f6e-0000-7000-8000-000000000051',
+      '01938f6e-0000-7000-8000-000000000052',
+      '01938f6e-0000-7000-8000-000000000053',
+    ];
+    const identity = '2026-11-20T19:23:41.749012Z';
+    try {
+      await system.run(({ client }) =>
+        client.query(
+          `insert into search_index_generations (id, index_uid, status, engine_created_at, broker_at_start, updated_at)
+           values
+             ($1, 'stale-active', 'active', $5, '{}', now() - interval '2 hours'),
+             ($2, 'fresh-retired', 'retired', $5, '{}', now()),
+             ($3, 'unbound-abandoned', 'abandoned', null, '{}', now() - interval '2 hours'),
+             ($4, 'drained-retired', 'retired', $5, '{}', now() - interval '2 hours')`,
+          [...ids, identity],
+        ),
+      );
+      const claims = await Promise.all([
+        runtime.claimExpiredGeneration(),
+        runtime.claimExpiredGeneration(),
+      ]);
+      const claimed = claims.find((entry) => entry !== null);
+      expect(claims).toContain(null);
+      expect(claimed).toEqual({
+        id: ids[3],
+        indexUid: 'drained-retired',
+        engineCreatedAt: identity,
+      });
+      if (!claimed) throw new Error('Expected a purge claim.');
+      await runtime.markGenerationPurged(claimed);
+      const result = await system.run(({ client }) =>
+        client.query(
+          'select id, purged_at is not null as purged from search_index_generations where id = any($1::uuid[]) order by id',
+          [ids],
+        ),
+      );
+      expect(result.rows).toEqual(ids.map((id, index) => ({ id, purged: index === 3 })));
+      expect(await runtime.claimExpiredGeneration()).toBeNull();
+    } finally {
+      await system.run(({ client }) =>
+        client.query('delete from search_index_generations where id = any($1::uuid[])', [ids]),
       );
     }
   });
@@ -1349,7 +1399,7 @@ describe('search-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 5 }]);
+    expect(journal.rows).toEqual([{ applied: 6 }]);
   });
 
   it('redelivers a Search event after rollback and acknowledges it after its refresh commits', async () => {

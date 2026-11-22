@@ -74,12 +74,20 @@ subscription returns and the kit acknowledges delivery. The platform tables from
 scaffold remain compatible with the preceding service image.
 
 Receipt cleanup runs in batches of at most 1,000 after 45 days, which covers event retention and
-the dead-letter replay window. A retired physical generation stays available during in-flight
-reads. Operations can reconcile retired or abandoned indexes by their recorded UID and exact
-creation identity after those reads drain. Unknown identities require manual investigation.
+the dead-letter replay window. A separate purge claims retired or abandoned generations with
+an exact recorded identity after one hour, longer than the in-flight read and write deadlines.
+Meilisearch deletion executes outside the claim transaction. The worker only marks a generation
+purged after successful deletion or confirmed absence and retries uncertain attempts after five
+minutes. The UID and creation identity stay recorded. An unbound candidate has not received
+projection writes. Unbound and replaced identities are left for operator investigation.
+An operator creating a replacement must use a new UID. The engine's deletion endpoint takes a
+UID without a version precondition, so a UID is never reused.
 
 ## Decisions
 
 - The index stores the organization as a filterable field. A search result still requires
   current authorization from the owning services.
 - Configuring the engine allows the readiness probe to report it as a dependency.
+- Hosted Search uses a dedicated key limited to `search_*` indexes with `search`, `indexes.get`,
+  `indexes.create`, `indexes.delete`, `tasks.get`, `settings.update`, `documents.add` and
+  `documents.delete` actions. The operator provisions that key before starting Search.
