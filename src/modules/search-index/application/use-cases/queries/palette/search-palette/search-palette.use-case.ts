@@ -100,27 +100,29 @@ export class SearchPalette {
           previous = item;
         }
         if (result.items.length > 0) {
-          const proofs = await this.authority.resolveAccess(
-            input.organizationId,
-            input.userId,
-            {
-              membership,
-              candidates: result.items.map((item) => ({ kind: item.kind, id: item.id })),
-            },
-            signal,
+          const matching = result.items.filter((item) =>
+            matchesLiteralSearch(
+              normalizedQuery,
+              item.name,
+              item.kind === 'task' ? item.id : undefined,
+            ),
           );
-          const authorized = matchEvidence(result.items, proofs.results, false);
-          for (const item of result.items) {
-            if (
-              authorized.has(key(item)) &&
-              matchesLiteralSearch(
-                normalizedQuery,
-                item.name,
-                item.kind === 'task' ? item.id : undefined,
-              )
-            ) {
-              visible.push(item);
-              if (visible.length > input.limit) break;
+          if (matching.length > 0) {
+            const proofs = await this.authority.resolveAccess(
+              input.organizationId,
+              input.userId,
+              {
+                membership,
+                candidates: matching.map((item) => ({ kind: item.kind, id: item.id })),
+              },
+              signal,
+            );
+            const authorized = matchEvidence(matching, proofs.results, false);
+            for (const item of matching) {
+              if (authorized.has(key(item))) {
+                visible.push(item);
+                if (visible.length > input.limit) break;
+              }
             }
           }
           after = previous;

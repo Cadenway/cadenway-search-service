@@ -99,6 +99,78 @@ describe('SearchPalette', () => {
     });
   });
 
+  it('skips authority lookup for nonmatching candidates and continues after their raw position', async () => {
+    const first = { ...task('CAD-1'), name: 'Other task' };
+    const last = { ...task('CAD-2'), name: 'Another task' };
+    const { search, read, resolveAccess } = fixture([]);
+    read
+      .mockResolvedValueOnce({ generation: 'gen-1', items: [first, last], hasMore: true })
+      .mockResolvedValueOnce({ generation: 'gen-1', items: [task('CAD-3')], hasMore: false });
+
+    expect(await search.execute(input)).toEqual({
+      kind: 'ok',
+      items: [{ kind: 'task', taskKey: 'CAD-3', name: 'Connexion SSO', status: 'progress' }],
+      nextCursor: null,
+    });
+    expect(read.mock.calls[1]?.[0]).toMatchObject({ after: last, generation: 'gen-1' });
+    expect(resolveAccess.mock.calls.map((call) => call[2].candidates)).toEqual([
+      [{ kind: 'task', id: 'CAD-3' }],
+      [{ kind: 'task', id: 'CAD-3' }],
+    ]);
+  });
+
+  it('authorizes only literal matches in a mixed page and preserves the visible cursor', async () => {
+    const { search, resolveAccess, encode } = fixture([
+      { ...task('CAD-1'), name: 'Other task' },
+      task('CAD-2'),
+      { ...task('CAD-3'), name: 'Another task' },
+      task('CAD-4'),
+    ]);
+
+    expect(await search.execute(input)).toEqual({
+      kind: 'ok',
+      items: [{ kind: 'task', taskKey: 'CAD-2', name: 'Connexion SSO', status: 'progress' }],
+      nextCursor: 'sealed',
+    });
+    expect(resolveAccess.mock.calls.map((call) => call[2].candidates)).toEqual([
+      [
+        { kind: 'task', id: 'CAD-2' },
+        { kind: 'task', id: 'CAD-4' },
+      ],
+      [
+        { kind: 'task', id: 'CAD-2' },
+        { kind: 'task', id: 'CAD-4' },
+      ],
+    ]);
+    expect(encode).toHaveBeenCalledWith({
+      userId: input.userId,
+      organizationId: input.organizationId,
+      normalizedQuery: 'sso',
+      after: { kind: 'task', id: 'CAD-2' },
+    });
+  });
+
+  it('checks Task membership when no candidates match the literal query', async () => {
+    const { search, resolveAccess, getMembership } = fixture([
+      { ...task('CAD-1'), name: 'Other task' },
+    ]);
+
+    expect(await search.execute(input)).toEqual({ kind: 'ok', items: [], nextCursor: null });
+    expect(resolveAccess).toHaveBeenCalledTimes(1);
+    expect(resolveAccess.mock.calls[0]?.[2].candidates).toEqual([]);
+    expect(getMembership).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects out-of-order candidates even when they do not match the query', async () => {
+    const { search, resolveAccess } = fixture([
+      { ...task('CAD-2'), name: 'Other task' },
+      { ...task('CAD-1'), name: 'Another task' },
+    ]);
+
+    expect(await search.execute(input)).toEqual({ kind: 'unavailable' });
+    expect(resolveAccess).not.toHaveBeenCalled();
+  });
+
   it('rejects duplicated or out-of-order authority evidence', async () => {
     const { search, resolveAccess } = fixture([task('CAD-1'), task('CAD-2')]);
     resolveAccess.mockResolvedValue({ results: [proof('CAD-2'), proof('CAD-1')] });
