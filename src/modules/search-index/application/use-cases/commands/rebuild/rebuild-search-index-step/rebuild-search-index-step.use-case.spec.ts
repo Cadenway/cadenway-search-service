@@ -191,21 +191,26 @@ describe('RebuildSearchIndexStep', () => {
     expect(promote.execute).not.toHaveBeenCalled();
   });
 
-  it('preserves the candidate when the first page is rejected', async () => {
-    const { command, next, page, abandon } = setup({
-      building: { generation, updatedAt: input.now },
-    });
-    next.execute.mockResolvedValue({
-      source: 'space',
-      organizationId: 'tenant',
-      cursor: null,
-      inFlightDeadline: null,
-      deferred: false,
-    });
-    page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('invalid-request'));
-    await expect(command.execute(input)).rejects.toMatchObject({ reason: 'invalid-request' });
-    expect(abandon.execute).not.toHaveBeenCalled();
-  });
+  it.each(['invalid-request', 'batch-too-large'] as const)(
+    'defers a rejected first page (%s) so other export positions can advance',
+    async (reason) => {
+      const { command, next, page, abandon, deferCheckpoint } = setup({
+        building: { generation, updatedAt: input.now },
+      });
+      const checkpoint = {
+        source: 'space',
+        organizationId: 'tenant',
+        cursor: null,
+        inFlightDeadline: null,
+        deferred: false,
+      };
+      next.execute.mockResolvedValue(checkpoint);
+      page.execute.mockRejectedValueOnce(new SearchAuthorityReadError(reason));
+      await expect(command.execute(input)).rejects.toMatchObject({ reason });
+      expect(deferCheckpoint).toHaveBeenCalledExactlyOnceWith('g', checkpoint, expect.any(Date));
+      expect(abandon.execute).not.toHaveBeenCalled();
+    },
+  );
   it('creates and binds only the registered winner after broker evidence', async () => {
     const { command, engine, bind, register } = setup();
     await expect(command.execute(input)).resolves.toBe('created');

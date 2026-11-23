@@ -101,11 +101,6 @@ export class RebuildSearchIndexStep {
             signal: input.signal,
           });
         } catch (error: unknown) {
-          if (error instanceof SearchAuthorityReadError && error.reason === 'unavailable') {
-            await this.exports.run((transaction) =>
-              transaction.deferCheckpoint(candidate.id, checkpoint, nextSearchReadAttempt()),
-            );
-          }
           if (
             checkpoint.cursor !== null &&
             error instanceof SearchAuthorityReadError &&
@@ -113,6 +108,11 @@ export class RebuildSearchIndexStep {
           ) {
             await this.abandon.execute({ generationId: candidate.id });
             return 'abandoned';
+          }
+          if (error instanceof SearchAuthorityReadError && error.reason !== 'cancelled') {
+            await this.exports.run((transaction) =>
+              transaction.deferCheckpoint(candidate.id, checkpoint, nextSearchReadAttempt()),
+            );
           }
           throw error;
         }
