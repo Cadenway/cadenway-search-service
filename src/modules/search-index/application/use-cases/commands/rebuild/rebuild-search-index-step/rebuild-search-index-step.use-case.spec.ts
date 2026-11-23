@@ -199,6 +199,25 @@ describe('RebuildSearchIndexStep', () => {
     expect(promote.execute).not.toHaveBeenCalled();
   });
 
+  it('leaves an interrupted export available for the replacement worker', async () => {
+    const { command, next, page, abandon, deferCheckpoint } = setup({
+      building: { generation, updatedAt: input.now },
+    });
+    next.execute.mockResolvedValue({
+      source: 'document',
+      organizationId: 'tenant',
+      cursor: 'current-page',
+      inFlightDeadline: null,
+      deferred: false,
+    });
+    const shutdown = new SearchAuthorityReadError('cancelled');
+    page.execute.mockRejectedValueOnce(shutdown);
+
+    await expect(command.execute(input)).rejects.toBe(shutdown);
+    expect(deferCheckpoint).not.toHaveBeenCalled();
+    expect(abandon.execute).not.toHaveBeenCalled();
+  });
+
   it.each(['invalid-request', 'batch-too-large'] as const)(
     'defers a rejected first page (%s) so other export positions can advance',
     async (reason) => {
