@@ -239,6 +239,7 @@ export const searchRebuildLoopProvider: FactoryProvider<SearchRebuildLoop> = {
           },
         },
         new PromoteSearchRebuild(promotion),
+        exports,
       ),
       runtime,
       pruneGeneration,

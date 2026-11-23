@@ -4,6 +4,7 @@ import type { SearchSystemAuthority } from '../../../../ports/outbound/http/auth
 import type { SearchRefreshUnitOfWork } from '../../../../ports/outbound/persistence/rebuild/search-refresh-unit-of-work.port.js';
 import type { SearchProjectionIndexerPort } from '../../../../ports/outbound/search/rebuild/search-projection-indexer.port.js';
 import type { SearchProjectionRemoverPort } from '../../../../ports/outbound/search/rebuild/search-projection-remover.port.js';
+import { nextSearchReadAttempt } from '../../../../../domain/policies/rebuild/search-read-retry.policy.js';
 
 import type { RefreshSearchProjectionInput } from './refresh-search-projection.input.js';
 import type { RefreshSearchProjectionOutput } from './refresh-search-projection.output.js';
@@ -56,7 +57,9 @@ export class RefreshSearchProjection {
       projection = await this.resolve(claim, input.signal);
       input.signal?.throwIfAborted();
     } catch (error: unknown) {
-      await this.release(claim);
+      await this.unitOfWork.run((transaction) =>
+        transaction.finish(claim, 'released', nextSearchReadAttempt()),
+      );
       throw error;
     }
 

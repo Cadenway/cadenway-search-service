@@ -1,6 +1,7 @@
 import type { DatabaseSchema, TransactionDatabase } from '@cadenway/nest-common/database';
-import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, eq, exists, isNotNull, isNull, sql } from 'drizzle-orm';
 
+import type { SearchGenerationCheckpoint } from '../../../../../application/models/rebuild/search-generation-checkpoint.model.js';
 import type { SearchRebuildExportClaim } from '../../../../../application/models/rebuild/search-rebuild-export-claim.model.js';
 import type { SearchRebuildExportPage } from '../../../../../application/models/rebuild/search-rebuild-export-page.model.js';
 import type { SearchRebuildExportPosition } from '../../../../../application/models/rebuild/search-rebuild-export-position.model.js';
@@ -76,6 +77,41 @@ export class DrizzleSearchRebuildExportRepository implements SearchRebuildExport
     return changed.length === 1 ? 'claimed' : 'stale';
   }
 
+  /** Delays a matching incomplete position without claiming any physical write. */
+  public async deferCheckpoint(
+    generationId: string,
+    checkpoint: SearchGenerationCheckpoint,
+    retryAt: Date,
+  ): Promise<void> {
+    const building = this.db
+      .select({ id: searchIndexGenerations.id })
+      .from(searchIndexGenerations)
+      .where(
+        and(
+          eq(searchIndexGenerations.id, generationId),
+          eq(searchIndexGenerations.status, 'building'),
+        ),
+      );
+    await this.db
+      .update(searchExportCheckpoints)
+      .set({ nextAttemptAt: retryAt, updatedAt: sql`statement_timestamp()` })
+      .where(
+        and(
+          eq(searchExportCheckpoints.generationId, generationId),
+          eq(searchExportCheckpoints.source, checkpoint.source),
+          checkpoint.organizationId === null
+            ? isNull(searchExportCheckpoints.organizationId)
+            : eq(searchExportCheckpoints.organizationId, checkpoint.organizationId),
+          checkpoint.cursor === null
+            ? isNull(searchExportCheckpoints.cursor)
+            : eq(searchExportCheckpoints.cursor, checkpoint.cursor),
+          eq(searchExportCheckpoints.complete, false),
+          isNull(searchExportCheckpoints.writeToken),
+          exists(building),
+        ),
+      );
+  }
+
   /** Advances a single tenant's source checkpoint. */
   public async recordExportPage(input: SearchRebuildExportPage): Promise<PageResult> {
     return this.advance(input, input.source, input.organizationId, input.claimToken);
@@ -142,6 +178,7 @@ export class DrizzleSearchRebuildExportRepository implements SearchRebuildExport
       .set({
         cursor: input.nextCursor,
         complete: targetComplete,
+        nextAttemptAt: null,
         writeToken: null,
         writeDeadline: null,
         updatedAt: new Date(),

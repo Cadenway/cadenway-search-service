@@ -12,5 +12,8 @@ export interface SearchGenerationCheckpoint {
 
   /** Deadline of an in-flight physical write, or null if no intent exists. */
   readonly inFlightDeadline: Date | null;
+
+  /** Whether the database clock is still before the next authoritative read attempt. */
+  readonly deferred: boolean;
   // #endregion
 }

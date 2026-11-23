@@ -53,7 +53,8 @@ function setup(result: 'claimed' | 'occupied' | 'expired' | 'stale' = 'claimed')
     return Promise.resolve('applied');
   });
   const unitOfWork: SearchRebuildExportPort = {
-    run: (work) => work({ claimExportPage, recordExportPage, recordRosterPage }),
+    run: (work) =>
+      work({ deferCheckpoint: vi.fn(), claimExportPage, recordExportPage, recordRosterPage }),
   };
   const command = new IndexSearchExportPage(
     authority,
@@ -77,7 +78,13 @@ function setup(result: 'claimed' | 'occupied' | 'expired' | 'stale' = 'claimed')
         consumers: [],
       },
     },
-    checkpoint: { source: 'space', organizationId: 'tenant', cursor: null, inFlightDeadline: null },
+    checkpoint: {
+      source: 'space',
+      organizationId: 'tenant',
+      cursor: null,
+      inFlightDeadline: null,
+      deferred: false,
+    },
     claimToken: '019a6f99-3ec0-7c2a-8e4a-2b8d41c98e01',
     claimedAt: new Date('2026-11-20T00:00:00Z'),
     claimDeadline: new Date('2026-11-20T00:01:00Z'),
@@ -123,6 +130,7 @@ describe('IndexSearchExportPage', () => {
           organizationId: null,
           cursor: null,
           inFlightDeadline: null,
+          deferred: false,
         },
       }),
     ).resolves.toBe('progressed');

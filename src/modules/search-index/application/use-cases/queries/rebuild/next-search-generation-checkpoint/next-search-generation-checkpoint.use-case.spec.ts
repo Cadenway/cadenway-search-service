@@ -13,6 +13,7 @@ describe('NextSearchGenerationCheckpoint', () => {
         organizationId: null,
         cursor: 'next',
         inFlightDeadline: null,
+        deferred: false,
       })
       .mockResolvedValueOnce(null);
     const unitOfWork: SearchGenerationPort = {
@@ -31,6 +32,7 @@ describe('NextSearchGenerationCheckpoint', () => {
       organizationId: null,
       cursor: 'next',
       inFlightDeadline: null,
+      deferred: false,
     });
     await expect(query.execute({ generationId: 'g' })).resolves.toBeNull();
     expect(nextCheckpoint).toHaveBeenCalledWith('g');

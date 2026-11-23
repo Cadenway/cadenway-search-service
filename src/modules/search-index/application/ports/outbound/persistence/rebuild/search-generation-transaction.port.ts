@@ -14,8 +14,8 @@ export interface SearchGenerationTransaction {
   /** Binds an unset identity or confirms the same existing identity on a building generation. */
   bindIdentity(generationId: string, engineCreatedAt: string): Promise<boolean>;
 
-  /** Marks a building generation abandoned, or confirms an already abandoned generation. */
-  abandon(generationId: string): Promise<boolean>;
+  /** Marks a candidate abandoned, optionally requiring the rejected checkpoint to be current. */
+  abandon(generationId: string, rejectedCheckpoint?: SearchGenerationCheckpoint): Promise<boolean>;
 
   /** Returns one incomplete checkpoint, roster first, then source and organization order. */
   nextCheckpoint(generationId: string): Promise<SearchGenerationCheckpoint | null>;

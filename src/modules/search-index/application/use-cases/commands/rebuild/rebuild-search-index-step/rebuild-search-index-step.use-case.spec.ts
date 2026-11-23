@@ -34,7 +34,7 @@ function setup(overrides: Partial<SearchRebuildRuntime> = {}) {
     building: null,
     activeQueueStuck: false,
     buildingHasExpiredIntent: false,
-    pendingCascades: false,
+    pendingRefreshes: false,
     ...overrides,
   };
   const runtime = { readState: vi.fn().mockResolvedValue(state) };
@@ -45,11 +45,12 @@ function setup(overrides: Partial<SearchRebuildRuntime> = {}) {
   const progress = { read: vi.fn().mockResolvedValue(broker) };
   const register = { execute: vi.fn().mockResolvedValue({ generation, newlyRegistered: true }) };
   const bind = { execute: vi.fn().mockResolvedValue(undefined) };
-  const abandon = { execute: vi.fn().mockResolvedValue(undefined) };
+  const abandon = { execute: vi.fn().mockResolvedValue(true) };
   const next = { execute: vi.fn().mockResolvedValue(null) };
   const page = { execute: vi.fn().mockResolvedValue('progressed') };
   const refresh = { execute: vi.fn().mockResolvedValue('idle') };
   const promote = { execute: vi.fn().mockResolvedValue(undefined) };
+  const deferCheckpoint = vi.fn().mockResolvedValue(undefined);
   const command = new RebuildSearchIndexStep(
     runtime,
     engine,
@@ -61,8 +62,29 @@ function setup(overrides: Partial<SearchRebuildRuntime> = {}) {
     page,
     refresh,
     promote,
+    {
+      run: (work) =>
+        work({
+          deferCheckpoint,
+          claimExportPage: vi.fn(),
+          recordExportPage: vi.fn(),
+          recordRosterPage: vi.fn(),
+        }),
+    },
   );
-  return { command, engine, progress, register, bind, abandon, next, page, refresh, promote };
+  return {
+    command,
+    engine,
+    progress,
+    register,
+    bind,
+    abandon,
+    next,
+    page,
+    refresh,
+    promote,
+    deferCheckpoint,
+  };
 }
 
 describe('RebuildSearchIndexStep', () => {
@@ -128,38 +150,94 @@ describe('RebuildSearchIndexStep', () => {
     expect(abandon.execute).toHaveBeenCalledWith({ generationId: 'g' });
   });
   it('abandons an invalid retained source cursor and preserves the candidate on transient failure', async () => {
-    const { command, next, page, abandon } = setup({
+    const { command, next, page, abandon, deferCheckpoint } = setup({
       building: { generation, updatedAt: input.now },
     });
-    next.execute.mockResolvedValue({
+    const checkpoint = {
       source: 'space',
       organizationId: 'tenant',
       cursor: 'old-cursor',
       inFlightDeadline: null,
-    });
+      deferred: false,
+    };
+    next.execute.mockResolvedValue(checkpoint);
     page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('unavailable'));
     await expect(command.execute(input)).rejects.toMatchObject({ reason: 'unavailable' });
     expect(abandon.execute).not.toHaveBeenCalled();
+    expect(deferCheckpoint).toHaveBeenCalledWith(
+      'g',
+      expect.objectContaining({ cursor: 'old-cursor' }),
+      expect.any(Date),
+    );
     page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('invalid-request'));
     await expect(command.execute(input)).resolves.toBe('abandoned');
     expect(abandon.execute).toHaveBeenCalledOnce();
-    expect(abandon.execute).toHaveBeenCalledWith({ generationId: 'g' });
+    expect(abandon.execute).toHaveBeenCalledWith({
+      generationId: 'g',
+      rejectedCheckpoint: checkpoint,
+    });
+
+    page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('invalid-request'));
+    abandon.execute.mockResolvedValueOnce(false);
+    await expect(command.execute(input)).resolves.toBe('waiting');
   });
 
-  it('preserves the candidate when the first page is rejected', async () => {
-    const { command, next, page, abandon } = setup({
+  it('waits for an unfinished deferred export without invoking promotion', async () => {
+    const { command, next, page, promote } = setup({
       building: { generation, updatedAt: input.now },
     });
     next.execute.mockResolvedValue({
-      source: 'space',
+      source: 'document',
       organizationId: 'tenant',
       cursor: null,
       inFlightDeadline: null,
+      deferred: true,
     });
-    page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('invalid-request'));
-    await expect(command.execute(input)).rejects.toMatchObject({ reason: 'invalid-request' });
+
+    await expect(command.execute(input)).resolves.toBe('waiting');
+    expect(page.execute).not.toHaveBeenCalled();
+    expect(promote.execute).not.toHaveBeenCalled();
+  });
+
+  it('leaves an interrupted export available for the replacement worker', async () => {
+    const { command, next, page, abandon, deferCheckpoint } = setup({
+      building: { generation, updatedAt: input.now },
+    });
+    next.execute.mockResolvedValue({
+      source: 'document',
+      organizationId: 'tenant',
+      cursor: 'current-page',
+      inFlightDeadline: null,
+      deferred: false,
+    });
+    const shutdown = new SearchAuthorityReadError('cancelled');
+    page.execute.mockRejectedValueOnce(shutdown);
+
+    await expect(command.execute(input)).rejects.toBe(shutdown);
+    expect(deferCheckpoint).not.toHaveBeenCalled();
     expect(abandon.execute).not.toHaveBeenCalled();
   });
+
+  it.each(['invalid-request', 'batch-too-large'] as const)(
+    'defers a rejected first page (%s) so other export positions can advance',
+    async (reason) => {
+      const { command, next, page, abandon, deferCheckpoint } = setup({
+        building: { generation, updatedAt: input.now },
+      });
+      const checkpoint = {
+        source: 'space',
+        organizationId: 'tenant',
+        cursor: null,
+        inFlightDeadline: null,
+        deferred: false,
+      };
+      next.execute.mockResolvedValue(checkpoint);
+      page.execute.mockRejectedValueOnce(new SearchAuthorityReadError(reason));
+      await expect(command.execute(input)).rejects.toMatchObject({ reason });
+      expect(deferCheckpoint).toHaveBeenCalledExactlyOnceWith('g', checkpoint, expect.any(Date));
+      expect(abandon.execute).not.toHaveBeenCalled();
+    },
+  );
   it('creates and binds only the registered winner after broker evidence', async () => {
     const { command, engine, bind, register } = setup();
     await expect(command.execute(input)).resolves.toBe('created');
@@ -215,6 +293,7 @@ describe('RebuildSearchIndexStep', () => {
       organizationId: 'tenant',
       cursor: null,
       inFlightDeadline: null,
+      deferred: false,
     });
     await expect(command.execute(input)).resolves.toBe('progressed');
     expect(page.execute).toHaveBeenCalledOnce();
@@ -234,7 +313,7 @@ describe('RebuildSearchIndexStep', () => {
     const state = {
       building: { generation, updatedAt: input.now },
       active: { ...generation, id: 'active', status: 'active' as const },
-      pendingCascades: true,
+      pendingRefreshes: true,
     };
     const { command, refresh, promote, next } = setup(state);
     await expect(command.execute(input)).resolves.toBe('waiting');

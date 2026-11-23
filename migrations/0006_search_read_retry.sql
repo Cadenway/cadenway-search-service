@@ -1,0 +1,2 @@
+ALTER TABLE "search_export_checkpoints" ADD COLUMN "next_attempt_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "search_pending_refreshes" ADD COLUMN "next_attempt_at" timestamp with time zone;

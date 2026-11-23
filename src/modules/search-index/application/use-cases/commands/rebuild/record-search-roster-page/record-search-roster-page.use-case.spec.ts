@@ -11,7 +11,12 @@ describe('RecordSearchRosterPage', () => {
       .fn<SearchRebuildExportTransaction['recordRosterPage']>()
       .mockResolvedValueOnce('applied')
       .mockResolvedValueOnce('already-applied');
-    const transaction = { recordRosterPage, recordExportPage: vi.fn(), claimExportPage: vi.fn() };
+    const transaction = {
+      deferCheckpoint: vi.fn(),
+      recordRosterPage,
+      recordExportPage: vi.fn(),
+      claimExportPage: vi.fn(),
+    };
     const unitOfWork: SearchRebuildExportPort = { run: (work) => work(transaction) };
     const command = new RecordSearchRosterPage(unitOfWork);
     const page = {
@@ -34,7 +39,12 @@ describe('RecordSearchRosterPage', () => {
       .mockResolvedValueOnce('stale');
     const unitOfWork: SearchRebuildExportPort = {
       run: (work) =>
-        work({ recordRosterPage, recordExportPage: vi.fn(), claimExportPage: vi.fn() }),
+        work({
+          deferCheckpoint: vi.fn(),
+          recordRosterPage,
+          recordExportPage: vi.fn(),
+          claimExportPage: vi.fn(),
+        }),
     };
     const command = new RecordSearchRosterPage(unitOfWork);
     const page = {

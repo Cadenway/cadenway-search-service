@@ -18,7 +18,7 @@ export interface SearchRebuildRuntime {
   /** An expired building-generation write intent prevents reuse of its index. */
   readonly buildingHasExpiredIntent: boolean;
 
-  /** The building generation has parent invalidations needing descendant reconciliation. */
-  readonly pendingCascades: boolean;
+  /** The building generation still has refresh work, including deferred or claimed locators. */
+  readonly pendingRefreshes: boolean;
   // #endregion
 }

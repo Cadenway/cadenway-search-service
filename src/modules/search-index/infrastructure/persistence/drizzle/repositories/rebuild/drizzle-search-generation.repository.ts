@@ -1,5 +1,5 @@
 import type { DatabaseSchema, TransactionDatabase } from '@cadenway/nest-common/database';
-import { and, asc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, exists, isNotNull, isNull, sql } from 'drizzle-orm';
 
 import type { SearchGenerationCheckpoint } from '../../../../../application/models/rebuild/search-generation-checkpoint.model.js';
 import type { SearchGenerationRegistration } from '../../../../../application/models/rebuild/search-generation-registration.model.js';
@@ -86,8 +86,33 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
     return existing.length === 1;
   }
 
-  /** Abandons one building candidate or confirms an earlier abandonment. */
-  public async abandon(generationId: string): Promise<boolean> {
+  /** Abandons one building candidate whose rejected checkpoint has not advanced or been claimed. */
+  public async abandon(
+    generationId: string,
+    checkpoint?: SearchGenerationCheckpoint,
+  ): Promise<boolean> {
+    const stillCurrent =
+      checkpoint === undefined
+        ? undefined
+        : exists(
+            this.db
+              .select({ generationId: searchExportCheckpoints.generationId })
+              .from(searchExportCheckpoints)
+              .where(
+                and(
+                  eq(searchExportCheckpoints.generationId, generationId),
+                  eq(searchExportCheckpoints.source, checkpoint.source),
+                  checkpoint.organizationId === null
+                    ? isNull(searchExportCheckpoints.organizationId)
+                    : eq(searchExportCheckpoints.organizationId, checkpoint.organizationId),
+                  checkpoint.cursor === null
+                    ? isNull(searchExportCheckpoints.cursor)
+                    : eq(searchExportCheckpoints.cursor, checkpoint.cursor),
+                  eq(searchExportCheckpoints.complete, false),
+                  isNull(searchExportCheckpoints.writeToken),
+                ),
+              ),
+          );
     const changed = await this.db
       .update(searchIndexGenerations)
       .set({ status: 'abandoned', updatedAt: sql`clock_timestamp()` })
@@ -95,6 +120,7 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
         and(
           eq(searchIndexGenerations.id, generationId),
           eq(searchIndexGenerations.status, 'building'),
+          stillCurrent,
         ),
       )
       .returning({ id: searchIndexGenerations.id });
@@ -112,7 +138,7 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
     return existing.length === 1;
   }
 
-  /** Returns the next incomplete export position after validating the candidate. */
+  /** Returns a ready export position, or reports a blocked position when none are ready. */
   public async nextCheckpoint(generationId: string): Promise<SearchGenerationCheckpoint | null> {
     const generation = await this.db
       .select({ id: searchIndexGenerations.id })
@@ -140,12 +166,14 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
       .limit(1);
     if (roster.length !== 1)
       throw new SearchRebuildPromotionError('The search organization checkpoint is missing.');
+    const deferred = sql<boolean>`coalesce(${searchExportCheckpoints.nextAttemptAt} > statement_timestamp(), false)`;
     const checkpoints = await this.db
       .select({
         source: searchExportCheckpoints.source,
         organizationId: searchExportCheckpoints.organizationId,
         cursor: searchExportCheckpoints.cursor,
         inFlightDeadline: searchExportCheckpoints.writeDeadline,
+        deferred,
       })
       .from(searchExportCheckpoints)
       .where(
@@ -155,7 +183,9 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
         ),
       )
       .orderBy(
+        asc(sql`(${deferred} or ${searchExportCheckpoints.writeToken} is not null)`),
         sql`case when ${searchExportCheckpoints.source} = 'organization' then 0 else 1 end`,
+        asc(searchExportCheckpoints.updatedAt),
         asc(searchExportCheckpoints.source),
         asc(searchExportCheckpoints.organizationId),
       )

@@ -1,3 +1,4 @@
+import type { SearchGenerationCheckpoint } from '../../../../models/rebuild/search-generation-checkpoint.model.js';
 import type { SearchRebuildExportPage } from '../../../../models/rebuild/search-rebuild-export-page.model.js';
 import type { SearchRebuildExportRosterPage } from '../../../../models/rebuild/search-rebuild-export-roster-page.model.js';
 import type { SearchRebuildExportClaim } from '../../../../models/rebuild/search-rebuild-export-claim.model.js';
@@ -12,6 +13,13 @@ export interface SearchRebuildExportTransaction {
   claimExportPage(
     input: SearchRebuildExportClaim,
   ): Promise<'claimed' | 'occupied' | 'expired' | 'stale'>;
+
+  /** Delays the same unclaimed export position after a failed upstream read. */
+  deferCheckpoint(
+    generationId: string,
+    checkpoint: SearchGenerationCheckpoint,
+    retryAt: Date,
+  ): Promise<void>;
 
   /**
    * Compares an incomplete tenant checkpoint and its claim, then advances it or completes it

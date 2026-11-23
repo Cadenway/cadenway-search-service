@@ -31,6 +31,7 @@ import { RecordSearchRefreshes } from '../src/modules/search-index/application/u
 import { DrizzleSearchParentReconciliation } from '../src/modules/search-index/infrastructure/persistence/drizzle/transactions/rebuild/drizzle-search-parent-reconciliation.unit-of-work.js';
 import { DrizzleSearchRuntimeStateRepository } from '../src/modules/search-index/infrastructure/persistence/drizzle/repositories/rebuild/drizzle-search-runtime-state.repository.js';
 import { DrizzleSearchRebuildExportUnitOfWork } from '../src/modules/search-index/infrastructure/persistence/drizzle/transactions/rebuild/drizzle-search-rebuild-export.unit-of-work.js';
+import { DrizzleSearchGenerationUnitOfWork } from '../src/modules/search-index/infrastructure/persistence/drizzle/transactions/rebuild/drizzle-search-generation.unit-of-work.js';
 import { DrizzleSearchRebuildPromotionUnitOfWork } from '../src/modules/search-index/infrastructure/persistence/drizzle/transactions/rebuild/drizzle-search-rebuild-promotion.unit-of-work.js';
 import { DrizzleSearchRefreshUnitOfWork } from '../src/modules/search-index/infrastructure/persistence/drizzle/transactions/rebuild/drizzle-search-refresh.unit-of-work.js';
 
@@ -334,7 +335,7 @@ describe('search-service wiring', () => {
         tableowner: 'search_migrator',
       })),
     );
-    expect(journal.rows).toEqual([{ applied: 6 }]);
+    expect(journal.rows).toEqual([{ applied: 7 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -343,7 +344,7 @@ describe('search-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 6 }]);
+    expect(journal.rows).toEqual([{ applied: 7 }]);
   });
 
   it('upgrades an existing platform database while the old application can still use its data', async () => {
@@ -454,7 +455,7 @@ describe('search-service wiring', () => {
       const journal = await owner.query<{ applied: number }>(
         'select count(*)::int as applied from drizzle.__drizzle_migrations',
       );
-      expect(journal.rows).toEqual([{ applied: 6 }]);
+      expect(journal.rows).toEqual([{ applied: 7 }]);
       const control = await new SystemTransactionRunner(application).run((tx) =>
         tx.client.query('select id from search_rebuild_control'),
       );
@@ -945,10 +946,29 @@ describe('search-service wiring', () => {
 
       await run(
         `insert into search_pending_refreshes (generation_id, organization_id, resource_kind, source_id, max_broker_sequence)
-        values ($1, $2, 'task', 'CAD-482', 11)`,
-        [retired, atelierNordId],
+        values ($1, $3, 'task', 'CAD-482', 11),
+          ($2, $3, 'document', 'document-unavailable', 12),
+          ($2, $3, 'task', 'CAD-483', 13)`,
+        [retired, active, atelierNordId],
       );
       expect(await unit.run((tx) => tx.claimNext(retired, firstToken, deadline))).toBeNull();
+      const unavailable = await unit.run((tx) => tx.claimNext(active, firstToken, deadline));
+      if (!unavailable) throw new Error('The unavailable document was not claimed.');
+      expect(unavailable.sourceId).toBe('document-unavailable');
+      await unit.run((tx) => tx.finish(unavailable, 'released', new Date(Date.now() + 60_000)));
+      const healthy = await unit.run((tx) => tx.claimNext(active, secondToken, deadline));
+      if (!healthy) throw new Error('The healthy task was not claimed.');
+      expect(healthy.sourceId).toBe('CAD-483');
+      await unit.run((tx) => tx.finish(healthy, 'applied'));
+      expect(await unit.run((tx) => tx.claimNext(active, secondToken, deadline))).toBeNull();
+      await run(
+        `update search_pending_refreshes set next_attempt_at = now() - interval '1 second'
+        where generation_id = $1 and source_id = 'document-unavailable'`,
+        [active],
+      );
+      expect(await unit.run((tx) => tx.claimNext(active, secondToken, deadline))).toMatchObject({
+        sourceId: 'document-unavailable',
+      });
     } finally {
       await run('delete from search_refresh_receipts where event_id = any($1::uuid[])', [
         [firstEvent, secondEvent, failedEvent],
@@ -1043,6 +1063,94 @@ describe('search-service wiring', () => {
           tx.recordExportPage({ ...claim, expectedCursor: 'page-two', nextCursor: null }),
         ),
       ).toBe('stale');
+    } finally {
+      await run('delete from search_index_generations where id = $1', [generationId]);
+    }
+  });
+
+  it('selects a ready export behind a deferred one without treating deferred exports as complete', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const generations = new DrizzleSearchGenerationUnitOfWork(system);
+    const exports = new DrizzleSearchRebuildExportUnitOfWork(system);
+    const generationId = '01938f6e-0000-7000-8000-000000000104';
+    const run = async (query: string, values: readonly unknown[]): Promise<void> => {
+      await system.run((tx) => tx.client.query(query, [...values]));
+    };
+    await run(
+      `insert into search_index_generations (id, index_uid, status, engine_created_at, broker_at_start)
+      values ($1, 'export-retry-test', 'building', 'engine', '{}')`,
+      [generationId],
+    );
+    try {
+      await run(
+        `insert into search_export_checkpoints (generation_id, source, organization_id, complete)
+        values ($1, 'organization', null, true), ($1, 'document', $2, false), ($1, 'task', $2, false)`,
+        [generationId, atelierNordId],
+      );
+      const next = () => generations.run((tx) => tx.nextCheckpoint(generationId));
+      const failed = await next();
+      if (!failed) throw new Error('The failed export position was not selected.');
+      expect(failed).toMatchObject({ source: 'document', deferred: false });
+      await exports.run((tx) =>
+        tx.deferCheckpoint(generationId, failed, new Date(Date.now() + 60_000)),
+      );
+      expect(await next()).toMatchObject({ source: 'task', deferred: false });
+      await run(
+        "update search_export_checkpoints set complete = true where generation_id = $1 and source = 'task'",
+        [generationId],
+      );
+      expect(await next()).toMatchObject({ source: 'document', deferred: true });
+      await run(
+        `update search_export_checkpoints set next_attempt_at = now() - interval '1 second'
+        where generation_id = $1 and source = 'document'`,
+        [generationId],
+      );
+      expect(await next()).toMatchObject({ source: 'document', deferred: false });
+    } finally {
+      await run('delete from search_index_generations where id = $1', [generationId]);
+    }
+  });
+
+  it('abandons only when a rejected continuation still matches unclaimed work', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const generations = new DrizzleSearchGenerationUnitOfWork(system);
+    const generationId = '01938f6e-0000-7000-8000-000000000105';
+    const claimToken = '01938f6e-0000-7000-8000-000000000106';
+    const run = async (query: string, values: readonly unknown[]): Promise<void> => {
+      await system.run((tx) => tx.client.query(query, [...values]));
+    };
+    await run(
+      `insert into search_index_generations (id, index_uid, status, engine_created_at, broker_at_start)
+      values ($1, 'stale-export-failure-test', 'building', 'engine', '{}')`,
+      [generationId],
+    );
+    try {
+      await run(
+        `insert into search_export_checkpoints
+          (generation_id, source, organization_id, cursor, complete, write_token, write_deadline)
+        values ($1, 'organization', null, null, true, null, null),
+               ($1, 'document', $2, 'next-page', false, $3, now() + interval '30 seconds')`,
+        [generationId, atelierNordId, claimToken],
+      );
+      const reject = (cursor: string) =>
+        generations.run((tx) =>
+          tx.abandon(generationId, {
+            source: 'document',
+            organizationId: atelierNordId,
+            cursor,
+            deferred: false,
+            inFlightDeadline: null,
+          }),
+        );
+      expect(await reject('next-page')).toBe(false);
+      await run(
+        'update search_export_checkpoints set write_token = null, write_deadline = null where write_token = $1',
+        [claimToken],
+      );
+      expect(await reject('old-page')).toBe(false);
+      expect(await generations.run((tx) => tx.findBuilding())).toMatchObject({ id: generationId });
+      expect(await reject('next-page')).toBe(true);
+      expect(await generations.run((tx) => tx.findBuilding())).toBeNull();
     } finally {
       await run('delete from search_index_generations where id = $1', [generationId]);
     }
@@ -1399,7 +1507,7 @@ describe('search-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 6 }]);
+    expect(journal.rows).toEqual([{ applied: 7 }]);
   });
 
   it('redelivers a Search event after rollback and acknowledges it after its refresh commits', async () => {

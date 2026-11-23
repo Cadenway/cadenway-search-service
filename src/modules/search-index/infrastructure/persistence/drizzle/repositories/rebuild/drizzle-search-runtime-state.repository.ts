@@ -70,7 +70,7 @@ export class DrizzleSearchRuntimeStateRepository implements SearchRebuildRuntime
             activeQueueStuck,
             building: null,
             buildingHasExpiredIntent: false,
-            pendingCascades: false,
+            pendingRefreshes: false,
           };
         }
         const expiredExports = await db
@@ -83,15 +83,10 @@ export class DrizzleSearchRuntimeStateRepository implements SearchRebuildRuntime
             ),
           )
           .limit(1);
-        const pendingParents = await db
+        const pendingRefreshes = await db
           .select({ sourceId: searchPendingRefreshes.sourceId })
           .from(searchPendingRefreshes)
-          .where(
-            and(
-              eq(searchPendingRefreshes.generationId, building.id),
-              inArray(searchPendingRefreshes.resourceKind, ['list', 'space']),
-            ),
-          )
+          .where(eq(searchPendingRefreshes.generationId, building.id))
           .limit(1);
         return {
           active: active === undefined ? null : { ...active, status: 'active' },
@@ -102,7 +97,7 @@ export class DrizzleSearchRuntimeStateRepository implements SearchRebuildRuntime
           },
           buildingHasExpiredIntent:
             expiredExports.length > 0 || (await hasExpiredRefresh(db, building.id)),
-          pendingCascades: pendingParents.length > 0,
+          pendingRefreshes: pendingRefreshes.length > 0,
         };
       },
       { isolationLevel: 'repeatable read', readOnly: true },

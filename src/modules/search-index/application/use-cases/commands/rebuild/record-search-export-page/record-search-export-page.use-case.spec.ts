@@ -14,7 +14,12 @@ describe('RecordSearchExportPage', () => {
       .mockResolvedValueOnce('stale');
     const unitOfWork: SearchRebuildExportPort = {
       run: (work) =>
-        work({ recordExportPage, recordRosterPage: vi.fn(), claimExportPage: vi.fn() }),
+        work({
+          deferCheckpoint: vi.fn(),
+          recordExportPage,
+          recordRosterPage: vi.fn(),
+          claimExportPage: vi.fn(),
+        }),
     };
     const command = new RecordSearchExportPage(unitOfWork);
     const page = {

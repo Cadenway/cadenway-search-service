@@ -51,8 +51,9 @@ persisted receipt even after the corresponding refresh has been applied.
 - Projection keys include the organization and resource kind.
 - Index mutations complete only after Meilisearch confirms the corresponding task succeeded.
 - The worker confirms the durable stream and consumer identities of the active generation
-  periodically. A confirmed replacement starts a rebuild. A candidate with a lost broker epoch,
-  rejected authority continuation, or expired uncertain write is abandoned with its UID.
+  periodically. A confirmed replacement starts a rebuild. A candidate with a lost broker epoch
+  or an expired uncertain write is abandoned with its UID. A rejected authority continuation
+  abandons the candidate only while that cursor still matches unclaimed work.
 - The promotion gate requires all authoritative exports to complete, a stable physical index and
   stream identity, the same caught-up durables, and no pending refreshes or unresolved terminal
   delivery advisories. An exact-filter durable can be caught up before the global stream's last
@@ -62,6 +63,11 @@ persisted receipt even after the corresponding refresh has been applied.
 
 Meilisearch tasks complete independently of PostgreSQL. Success is confirmed before a caller
 can persist its position in a reconstruction.
+
+Failed authoritative reads defer the affected refresh locator or export position for 30 seconds.
+Ready work can progress independently, including across organizations and source services. A
+deferred position remains incomplete for promotion, and a concurrent position change or
+physical-write claim is preserved. Uncertain writes retain their original claims for recovery.
 
 The promotion transaction locks `search_rebuild_control`, verifies the persisted coverage, then
 retires the current generation and activates its successor in one commit. Broker and engine

@@ -20,8 +20,9 @@ export interface SearchRefreshTransaction {
 
   /**
    * Settles work for the current token. An applied revision may leave a newer revision pending.
-   * Use released only when no physical write was attempted. An uncertain write remains claimed.
+   * Use released only when no physical write was attempted. Supply a retry time after a failed
+   * read. An uncertain write remains claimed.
    */
-  finish(claim: SearchRefreshClaim, result: 'applied' | 'released'): Promise<void>;
+  finish(claim: SearchRefreshClaim, result: 'applied' | 'released', retryAt?: Date): Promise<void>;
   // #endregion
 }

@@ -90,13 +90,13 @@ describe('RefreshSearchProjection', () => {
     expect(finish).toHaveBeenCalledWith(attachmentClaim, 'applied');
   });
 
-  it('releases the claim when the authority read fails or supplies a different locator', async () => {
+  it('defers the claim when the authority read fails or supplies a different locator', async () => {
     const { useCase, resolveTaskProjections, finish, write } = fixture();
     resolveTaskProjections.mockResolvedValue({
       results: [{ status: 'absent', id: 'CAD-999', version: null }],
     });
     await expect(useCase.execute(input)).rejects.toThrow('Invalid Task evidence');
-    expect(finish).toHaveBeenCalledWith(claim, 'released');
+    expect(finish).toHaveBeenCalledWith(claim, 'released', expect.any(Date));
     expect(write).not.toHaveBeenCalled();
   });
 

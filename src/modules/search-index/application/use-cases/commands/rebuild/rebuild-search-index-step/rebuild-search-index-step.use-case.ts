@@ -1,7 +1,9 @@
 import { SearchAuthorityReadError } from '../../../../../domain/errors/authority/search-authority-read.error.js';
 import { SearchRebuildPromotionError } from '../../../../../domain/errors/rebuild/search-rebuild-promotion.error.js';
+import { nextSearchReadAttempt } from '../../../../../domain/policies/rebuild/search-read-retry.policy.js';
 import type { SearchRebuildBrokerProgress } from '../../../../../domain/value-objects/rebuild/search-rebuild-broker-progress.value-object.js';
 import type { SearchBrokerProgressReader } from '../../../../ports/outbound/messaging/rebuild/search-broker-progress-reader.port.js';
+import type { SearchRebuildExportPort } from '../../../../ports/outbound/persistence/rebuild/search-rebuild-export.port.js';
 import type { SearchRebuildRuntimePort } from '../../../../ports/outbound/persistence/rebuild/search-rebuild-runtime.port.js';
 import type { SearchGenerationEnginePort } from '../../../../ports/outbound/search/rebuild/search-generation-engine.port.js';
 import type { NextSearchGenerationCheckpoint } from '../../../queries/rebuild/next-search-generation-checkpoint/next-search-generation-checkpoint.use-case.js';
@@ -32,6 +34,7 @@ export class RebuildSearchIndexStep {
     private readonly exportPage: Pick<IndexSearchExportPage, 'execute'>,
     private readonly refresh: Pick<RefreshSearchProjection, 'execute'>,
     private readonly promote: Pick<PromoteSearchRebuild, 'execute'>,
+    private readonly exports: SearchRebuildExportPort,
   ) {}
   // #endregion
 
@@ -86,6 +89,7 @@ export class RebuildSearchIndexStep {
       }
       const checkpoint = await this.nextCheckpoint.execute({ generationId: candidate.id });
       if (checkpoint !== null) {
+        if (checkpoint.deferred || checkpoint.inFlightDeadline !== null) return 'waiting';
         let result: Awaited<ReturnType<IndexSearchExportPage['execute']>>;
         try {
           result = await this.exportPage.execute({
@@ -102,8 +106,16 @@ export class RebuildSearchIndexStep {
             error instanceof SearchAuthorityReadError &&
             error.reason === 'invalid-request'
           ) {
-            await this.abandon.execute({ generationId: candidate.id });
-            return 'abandoned';
+            const abandoned = await this.abandon.execute({
+              generationId: candidate.id,
+              rejectedCheckpoint: checkpoint,
+            });
+            return abandoned ? 'abandoned' : 'waiting';
+          }
+          if (error instanceof SearchAuthorityReadError && error.reason !== 'cancelled') {
+            await this.exports.run((transaction) =>
+              transaction.deferCheckpoint(candidate.id, checkpoint, nextSearchReadAttempt()),
+            );
           }
           throw error;
         }
@@ -120,7 +132,7 @@ export class RebuildSearchIndexStep {
         signal: input.signal,
       });
       if (refresh === 'applied') return 'progressed';
-      if (refresh === 'requires-cascade' || state.pendingCascades) return 'waiting';
+      if (refresh === 'requires-cascade' || state.pendingRefreshes) return 'waiting';
       const broker = await this.broker.read(input.signal);
       if (broker === null) return 'waiting';
       try {
