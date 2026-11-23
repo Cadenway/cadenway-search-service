@@ -1111,6 +1111,51 @@ describe('search-service wiring', () => {
     }
   });
 
+  it('abandons only when a rejected continuation still matches unclaimed work', async () => {
+    const system = service().get(SystemTransactionRunner);
+    const generations = new DrizzleSearchGenerationUnitOfWork(system);
+    const generationId = '01938f6e-0000-7000-8000-000000000105';
+    const claimToken = '01938f6e-0000-7000-8000-000000000106';
+    const run = async (query: string, values: readonly unknown[]): Promise<void> => {
+      await system.run((tx) => tx.client.query(query, [...values]));
+    };
+    await run(
+      `insert into search_index_generations (id, index_uid, status, engine_created_at, broker_at_start)
+      values ($1, 'stale-export-failure-test', 'building', 'engine', '{}')`,
+      [generationId],
+    );
+    try {
+      await run(
+        `insert into search_export_checkpoints
+          (generation_id, source, organization_id, cursor, complete, write_token, write_deadline)
+        values ($1, 'organization', null, null, true, null, null),
+               ($1, 'document', $2, 'next-page', false, $3, now() + interval '30 seconds')`,
+        [generationId, atelierNordId, claimToken],
+      );
+      const reject = (cursor: string) =>
+        generations.run((tx) =>
+          tx.abandon(generationId, {
+            source: 'document',
+            organizationId: atelierNordId,
+            cursor,
+            deferred: false,
+            inFlightDeadline: null,
+          }),
+        );
+      expect(await reject('next-page')).toBe(false);
+      await run(
+        'update search_export_checkpoints set write_token = null, write_deadline = null where write_token = $1',
+        [claimToken],
+      );
+      expect(await reject('old-page')).toBe(false);
+      expect(await generations.run((tx) => tx.findBuilding())).toMatchObject({ id: generationId });
+      expect(await reject('next-page')).toBe(true);
+      expect(await generations.run((tx) => tx.findBuilding())).toBeNull();
+    } finally {
+      await run('delete from search_index_generations where id = $1', [generationId]);
+    }
+  });
+
   it('commits parent progress with child invalidations and restarts after a newer parent revision', async () => {
     const system = service().get(SystemTransactionRunner);
     const parent = new DrizzleSearchParentReconciliation(system);

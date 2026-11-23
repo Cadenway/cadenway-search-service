@@ -106,8 +106,11 @@ export class RebuildSearchIndexStep {
             error instanceof SearchAuthorityReadError &&
             error.reason === 'invalid-request'
           ) {
-            await this.abandon.execute({ generationId: candidate.id });
-            return 'abandoned';
+            const abandoned = await this.abandon.execute({
+              generationId: candidate.id,
+              rejectedCheckpoint: checkpoint,
+            });
+            return abandoned ? 'abandoned' : 'waiting';
           }
           if (error instanceof SearchAuthorityReadError && error.reason !== 'cancelled') {
             await this.exports.run((transaction) =>

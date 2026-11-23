@@ -45,7 +45,7 @@ function setup(overrides: Partial<SearchRebuildRuntime> = {}) {
   const progress = { read: vi.fn().mockResolvedValue(broker) };
   const register = { execute: vi.fn().mockResolvedValue({ generation, newlyRegistered: true }) };
   const bind = { execute: vi.fn().mockResolvedValue(undefined) };
-  const abandon = { execute: vi.fn().mockResolvedValue(undefined) };
+  const abandon = { execute: vi.fn().mockResolvedValue(true) };
   const next = { execute: vi.fn().mockResolvedValue(null) };
   const page = { execute: vi.fn().mockResolvedValue('progressed') };
   const refresh = { execute: vi.fn().mockResolvedValue('idle') };
@@ -153,13 +153,14 @@ describe('RebuildSearchIndexStep', () => {
     const { command, next, page, abandon, deferCheckpoint } = setup({
       building: { generation, updatedAt: input.now },
     });
-    next.execute.mockResolvedValue({
+    const checkpoint = {
       source: 'space',
       organizationId: 'tenant',
       cursor: 'old-cursor',
       inFlightDeadline: null,
       deferred: false,
-    });
+    };
+    next.execute.mockResolvedValue(checkpoint);
     page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('unavailable'));
     await expect(command.execute(input)).rejects.toMatchObject({ reason: 'unavailable' });
     expect(abandon.execute).not.toHaveBeenCalled();
@@ -171,7 +172,14 @@ describe('RebuildSearchIndexStep', () => {
     page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('invalid-request'));
     await expect(command.execute(input)).resolves.toBe('abandoned');
     expect(abandon.execute).toHaveBeenCalledOnce();
-    expect(abandon.execute).toHaveBeenCalledWith({ generationId: 'g' });
+    expect(abandon.execute).toHaveBeenCalledWith({
+      generationId: 'g',
+      rejectedCheckpoint: checkpoint,
+    });
+
+    page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('invalid-request'));
+    abandon.execute.mockResolvedValueOnce(false);
+    await expect(command.execute(input)).resolves.toBe('waiting');
   });
 
   it('waits for an unfinished deferred export without invoking promotion', async () => {

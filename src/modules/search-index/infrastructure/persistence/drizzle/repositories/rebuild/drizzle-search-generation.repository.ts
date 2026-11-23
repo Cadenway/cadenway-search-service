@@ -1,5 +1,5 @@
 import type { DatabaseSchema, TransactionDatabase } from '@cadenway/nest-common/database';
-import { and, asc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, exists, isNotNull, isNull, sql } from 'drizzle-orm';
 
 import type { SearchGenerationCheckpoint } from '../../../../../application/models/rebuild/search-generation-checkpoint.model.js';
 import type { SearchGenerationRegistration } from '../../../../../application/models/rebuild/search-generation-registration.model.js';
@@ -86,8 +86,33 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
     return existing.length === 1;
   }
 
-  /** Abandons one building candidate or confirms an earlier abandonment. */
-  public async abandon(generationId: string): Promise<boolean> {
+  /** Abandons one building candidate whose rejected checkpoint has not advanced or been claimed. */
+  public async abandon(
+    generationId: string,
+    checkpoint?: SearchGenerationCheckpoint,
+  ): Promise<boolean> {
+    const stillCurrent =
+      checkpoint === undefined
+        ? undefined
+        : exists(
+            this.db
+              .select({ generationId: searchExportCheckpoints.generationId })
+              .from(searchExportCheckpoints)
+              .where(
+                and(
+                  eq(searchExportCheckpoints.generationId, generationId),
+                  eq(searchExportCheckpoints.source, checkpoint.source),
+                  checkpoint.organizationId === null
+                    ? isNull(searchExportCheckpoints.organizationId)
+                    : eq(searchExportCheckpoints.organizationId, checkpoint.organizationId),
+                  checkpoint.cursor === null
+                    ? isNull(searchExportCheckpoints.cursor)
+                    : eq(searchExportCheckpoints.cursor, checkpoint.cursor),
+                  eq(searchExportCheckpoints.complete, false),
+                  isNull(searchExportCheckpoints.writeToken),
+                ),
+              ),
+          );
     const changed = await this.db
       .update(searchIndexGenerations)
       .set({ status: 'abandoned', updatedAt: sql`clock_timestamp()` })
@@ -95,6 +120,7 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
         and(
           eq(searchIndexGenerations.id, generationId),
           eq(searchIndexGenerations.status, 'building'),
+          stillCurrent,
         ),
       )
       .returning({ id: searchIndexGenerations.id });

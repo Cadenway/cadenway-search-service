@@ -11,12 +11,14 @@ export class AbandonSearchGeneration {
 
   // #region Methods
   /** Makes abandonment retryable while preserving the active generation. */
-  public async execute(input: AbandonSearchGenerationInput): Promise<void> {
+  public async execute(input: AbandonSearchGenerationInput): Promise<boolean> {
     if (input.generationId.length === 0) throw new Error('Invalid search generation identifier.');
-    await this.unitOfWork.run(async (transaction): Promise<void> => {
-      if (!(await transaction.abandon(input.generationId))) {
+    return this.unitOfWork.run(async (transaction): Promise<boolean> => {
+      const abandoned = await transaction.abandon(input.generationId, input.rejectedCheckpoint);
+      if (!abandoned && input.rejectedCheckpoint === undefined) {
         throw new Error('Search generation cannot be abandoned.');
       }
+      return abandoned;
     });
   }
   // #endregion
