@@ -34,7 +34,7 @@ function setup(overrides: Partial<SearchRebuildRuntime> = {}) {
     building: null,
     activeQueueStuck: false,
     buildingHasExpiredIntent: false,
-    pendingCascades: false,
+    pendingRefreshes: false,
     ...overrides,
   };
   const runtime = { readState: vi.fn().mockResolvedValue(state) };
@@ -50,6 +50,7 @@ function setup(overrides: Partial<SearchRebuildRuntime> = {}) {
   const page = { execute: vi.fn().mockResolvedValue('progressed') };
   const refresh = { execute: vi.fn().mockResolvedValue('idle') };
   const promote = { execute: vi.fn().mockResolvedValue(undefined) };
+  const deferCheckpoint = vi.fn().mockResolvedValue(undefined);
   const command = new RebuildSearchIndexStep(
     runtime,
     engine,
@@ -61,8 +62,29 @@ function setup(overrides: Partial<SearchRebuildRuntime> = {}) {
     page,
     refresh,
     promote,
+    {
+      run: (work) =>
+        work({
+          deferCheckpoint,
+          claimExportPage: vi.fn(),
+          recordExportPage: vi.fn(),
+          recordRosterPage: vi.fn(),
+        }),
+    },
   );
-  return { command, engine, progress, register, bind, abandon, next, page, refresh, promote };
+  return {
+    command,
+    engine,
+    progress,
+    register,
+    bind,
+    abandon,
+    next,
+    page,
+    refresh,
+    promote,
+    deferCheckpoint,
+  };
 }
 
 describe('RebuildSearchIndexStep', () => {
@@ -128,7 +150,7 @@ describe('RebuildSearchIndexStep', () => {
     expect(abandon.execute).toHaveBeenCalledWith({ generationId: 'g' });
   });
   it('abandons an invalid retained source cursor and preserves the candidate on transient failure', async () => {
-    const { command, next, page, abandon } = setup({
+    const { command, next, page, abandon, deferCheckpoint } = setup({
       building: { generation, updatedAt: input.now },
     });
     next.execute.mockResolvedValue({
@@ -136,14 +158,37 @@ describe('RebuildSearchIndexStep', () => {
       organizationId: 'tenant',
       cursor: 'old-cursor',
       inFlightDeadline: null,
+      deferred: false,
     });
     page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('unavailable'));
     await expect(command.execute(input)).rejects.toMatchObject({ reason: 'unavailable' });
     expect(abandon.execute).not.toHaveBeenCalled();
+    expect(deferCheckpoint).toHaveBeenCalledWith(
+      'g',
+      expect.objectContaining({ cursor: 'old-cursor' }),
+      expect.any(Date),
+    );
     page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('invalid-request'));
     await expect(command.execute(input)).resolves.toBe('abandoned');
     expect(abandon.execute).toHaveBeenCalledOnce();
     expect(abandon.execute).toHaveBeenCalledWith({ generationId: 'g' });
+  });
+
+  it('waits for an unfinished deferred export without invoking promotion', async () => {
+    const { command, next, page, promote } = setup({
+      building: { generation, updatedAt: input.now },
+    });
+    next.execute.mockResolvedValue({
+      source: 'document',
+      organizationId: 'tenant',
+      cursor: null,
+      inFlightDeadline: null,
+      deferred: true,
+    });
+
+    await expect(command.execute(input)).resolves.toBe('waiting');
+    expect(page.execute).not.toHaveBeenCalled();
+    expect(promote.execute).not.toHaveBeenCalled();
   });
 
   it('preserves the candidate when the first page is rejected', async () => {
@@ -155,6 +200,7 @@ describe('RebuildSearchIndexStep', () => {
       organizationId: 'tenant',
       cursor: null,
       inFlightDeadline: null,
+      deferred: false,
     });
     page.execute.mockRejectedValueOnce(new SearchAuthorityReadError('invalid-request'));
     await expect(command.execute(input)).rejects.toMatchObject({ reason: 'invalid-request' });
@@ -215,6 +261,7 @@ describe('RebuildSearchIndexStep', () => {
       organizationId: 'tenant',
       cursor: null,
       inFlightDeadline: null,
+      deferred: false,
     });
     await expect(command.execute(input)).resolves.toBe('progressed');
     expect(page.execute).toHaveBeenCalledOnce();
@@ -234,7 +281,7 @@ describe('RebuildSearchIndexStep', () => {
     const state = {
       building: { generation, updatedAt: input.now },
       active: { ...generation, id: 'active', status: 'active' as const },
-      pendingCascades: true,
+      pendingRefreshes: true,
     };
     const { command, refresh, promote, next } = setup(state);
     await expect(command.execute(input)).resolves.toBe('waiting');

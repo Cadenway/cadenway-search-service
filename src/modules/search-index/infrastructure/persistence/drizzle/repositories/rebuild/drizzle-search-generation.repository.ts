@@ -112,7 +112,7 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
     return existing.length === 1;
   }
 
-  /** Returns the next incomplete export position after validating the candidate. */
+  /** Returns a ready export position, or reports a blocked position when none are ready. */
   public async nextCheckpoint(generationId: string): Promise<SearchGenerationCheckpoint | null> {
     const generation = await this.db
       .select({ id: searchIndexGenerations.id })
@@ -140,12 +140,14 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
       .limit(1);
     if (roster.length !== 1)
       throw new SearchRebuildPromotionError('The search organization checkpoint is missing.');
+    const deferred = sql<boolean>`coalesce(${searchExportCheckpoints.nextAttemptAt} > statement_timestamp(), false)`;
     const checkpoints = await this.db
       .select({
         source: searchExportCheckpoints.source,
         organizationId: searchExportCheckpoints.organizationId,
         cursor: searchExportCheckpoints.cursor,
         inFlightDeadline: searchExportCheckpoints.writeDeadline,
+        deferred,
       })
       .from(searchExportCheckpoints)
       .where(
@@ -155,7 +157,9 @@ export class DrizzleSearchGenerationRepository implements SearchGenerationTransa
         ),
       )
       .orderBy(
+        asc(sql`(${deferred} or ${searchExportCheckpoints.writeToken} is not null)`),
         sql`case when ${searchExportCheckpoints.source} = 'organization' then 0 else 1 end`,
+        asc(searchExportCheckpoints.updatedAt),
         asc(searchExportCheckpoints.source),
         asc(searchExportCheckpoints.organizationId),
       )

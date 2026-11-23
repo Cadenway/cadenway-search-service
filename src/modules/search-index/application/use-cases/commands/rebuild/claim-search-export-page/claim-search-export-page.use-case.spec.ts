@@ -24,7 +24,12 @@ describe('ClaimSearchExportPage', () => {
       .mockResolvedValueOnce('stale');
     const unitOfWork: SearchRebuildExportPort = {
       run: (work) =>
-        work({ claimExportPage, recordExportPage: vi.fn(), recordRosterPage: vi.fn() }),
+        work({
+          deferCheckpoint: vi.fn(),
+          claimExportPage,
+          recordExportPage: vi.fn(),
+          recordRosterPage: vi.fn(),
+        }),
     };
     const command = new ClaimSearchExportPage(unitOfWork);
     await expect(command.execute(input)).resolves.toBe('claimed');

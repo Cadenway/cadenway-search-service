@@ -86,7 +86,7 @@ describe('ReconcileSearchParentPage', () => {
       firstPage.useCase.execute({ ...input, checkpoint: { phase: 'tasks', cursor: null } }),
     ).rejects.toMatchObject({ reason: 'invalid-request' });
     expect(firstPage.advance).not.toHaveBeenCalled();
-    expect(firstPage.release).toHaveBeenCalledWith(claim);
+    expect(firstPage.release).toHaveBeenCalledWith(claim, expect.any(Date));
 
     const indexed = fixture();
     indexed.read.mockRejectedValue(new SearchAuthorityReadError('invalid-request'));
@@ -97,7 +97,7 @@ describe('ReconcileSearchParentPage', () => {
       }),
     ).rejects.toMatchObject({ reason: 'invalid-request' });
     expect(indexed.advance).not.toHaveBeenCalled();
-    expect(indexed.release).toHaveBeenCalledWith(claim);
+    expect(indexed.release).toHaveBeenCalledWith(claim, expect.any(Date));
   });
 
   it('atomically queues old index descendants before advancing to the authority scan', async () => {
@@ -161,7 +161,7 @@ describe('ReconcileSearchParentPage', () => {
     await expect(useCase.execute(input)).rejects.toThrow(
       'Invalid Search parent descendant locator',
     );
-    expect(release).toHaveBeenCalledWith(claim);
+    expect(release).toHaveBeenCalledWith(claim, expect.any(Date));
     expect(advance).not.toHaveBeenCalled();
   });
 

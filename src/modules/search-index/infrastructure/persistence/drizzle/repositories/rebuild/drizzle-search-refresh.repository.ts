@@ -76,7 +76,7 @@ export class DrizzleSearchRefreshRepository implements SearchRefreshTransaction 
       });
   }
 
-  /** Claims the oldest unclaimed locator only when its index identity is recorded. */
+  /** Claims a due locator only when its index identity is recorded. */
   public async claimNext(
     generationId: string,
     token: string,
@@ -98,11 +98,15 @@ export class DrizzleSearchRefreshRepository implements SearchRefreshTransaction 
         and(
           eq(searchPendingRefreshes.generationId, generationId),
           isNull(searchPendingRefreshes.claimToken),
+          sql`(${searchPendingRefreshes.nextAttemptAt} is null or ${searchPendingRefreshes.nextAttemptAt} <= statement_timestamp())`,
           inArray(searchIndexGenerations.status, ['active', 'building']),
           isNotNull(searchIndexGenerations.engineCreatedAt),
         ),
       )
       .orderBy(
+        asc(
+          sql`coalesce(${searchPendingRefreshes.nextAttemptAt}, ${searchPendingRefreshes.createdAt})`,
+        ),
         asc(searchPendingRefreshes.maxBrokerSequence),
         asc(searchPendingRefreshes.organizationId),
         asc(searchPendingRefreshes.resourceKind),
@@ -137,7 +141,11 @@ export class DrizzleSearchRefreshRepository implements SearchRefreshTransaction 
   }
 
   /** Removes an applied revision or releases only the current token's pending work. */
-  public async finish(claim: SearchRefreshClaim, result: 'applied' | 'released'): Promise<void> {
+  public async finish(
+    claim: SearchRefreshClaim,
+    result: 'applied' | 'released',
+    retryAt?: Date,
+  ): Promise<void> {
     const claimed = and(
       eq(searchPendingRefreshes.generationId, claim.generationId),
       eq(searchPendingRefreshes.organizationId, claim.organizationId),
@@ -154,7 +162,12 @@ export class DrizzleSearchRefreshRepository implements SearchRefreshTransaction 
     }
     await this.db
       .update(searchPendingRefreshes)
-      .set({ claimToken: null, claimDeadline: null, updatedAt: new Date() })
+      .set({
+        claimToken: null,
+        claimDeadline: null,
+        nextAttemptAt: retryAt ?? null,
+        updatedAt: new Date(),
+      })
       .where(claimed);
   }
   // #endregion

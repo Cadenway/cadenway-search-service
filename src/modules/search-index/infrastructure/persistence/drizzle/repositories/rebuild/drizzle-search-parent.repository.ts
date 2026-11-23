@@ -42,11 +42,15 @@ export class DrizzleSearchParentRepository {
           eq(searchPendingRefreshes.generationId, generationId),
           inArray(searchPendingRefreshes.resourceKind, ['list', 'space']),
           isNull(searchPendingRefreshes.claimToken),
+          sql`(${searchPendingRefreshes.nextAttemptAt} is null or ${searchPendingRefreshes.nextAttemptAt} <= statement_timestamp())`,
           inArray(searchIndexGenerations.status, ['active', 'building']),
           isNotNull(searchIndexGenerations.engineCreatedAt),
         ),
       )
       .orderBy(
+        asc(
+          sql`coalesce(${searchPendingRefreshes.nextAttemptAt}, ${searchPendingRefreshes.createdAt})`,
+        ),
         asc(searchPendingRefreshes.maxBrokerSequence),
         asc(searchPendingRefreshes.organizationId),
         asc(searchPendingRefreshes.resourceKind),
@@ -159,6 +163,7 @@ export class DrizzleSearchParentRepository {
         cascadeCursor: next.cursor,
         claimToken: null,
         claimDeadline: null,
+        nextAttemptAt: null,
         updatedAt: new Date(),
       })
       .where(this.claimScope(claim));
@@ -166,10 +171,15 @@ export class DrizzleSearchParentRepository {
   }
 
   /** Releases a token known not to have started a physical parent write. */
-  public async release(claim: SearchRefreshClaim): Promise<void> {
+  public async release(claim: SearchRefreshClaim, retryAt: Date): Promise<void> {
     await this.db
       .update(searchPendingRefreshes)
-      .set({ claimToken: null, claimDeadline: null, updatedAt: new Date() })
+      .set({
+        claimToken: null,
+        claimDeadline: null,
+        nextAttemptAt: retryAt,
+        updatedAt: new Date(),
+      })
       .where(this.claimScope(claim));
   }
 
@@ -239,6 +249,7 @@ export class DrizzleSearchParentRepository {
         cascadeCursor: null,
         claimToken: null,
         claimDeadline: null,
+        nextAttemptAt: null,
         updatedAt: new Date(),
       })
       .where(this.claimScope(claim));

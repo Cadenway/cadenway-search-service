@@ -6,6 +6,7 @@ import type { SearchParentDescendantReader } from '../../../../ports/outbound/se
 import type { SearchProjectionIndexerPort } from '../../../../ports/outbound/search/rebuild/search-projection-indexer.port.js';
 import type { SearchProjectionRemoverPort } from '../../../../ports/outbound/search/rebuild/search-projection-remover.port.js';
 import { SearchAuthorityReadError } from '../../../../../domain/errors/authority/search-authority-read.error.js';
+import { nextSearchReadAttempt } from '../../../../../domain/policies/rebuild/search-read-retry.policy.js';
 
 import type { ReconcileSearchParentPageInput } from './reconcile-search-parent-page.input.js';
 import type { ReconcileSearchParentPageOutput } from './reconcile-search-parent-page.output.js';
@@ -99,7 +100,7 @@ export class ReconcileSearchParentPage {
         children: page.items,
       });
     } catch (error: unknown) {
-      await this.checkpointStore.release(claim);
+      await this.checkpointStore.release(claim, nextSearchReadAttempt());
       throw error;
     }
   }
@@ -170,7 +171,7 @@ export class ReconcileSearchParentPage {
       projection = decision.status === 'present' ? decision.projection : null;
       input.signal?.throwIfAborted();
     } catch (error: unknown) {
-      await this.checkpointStore.release(claim);
+      await this.checkpointStore.release(claim, nextSearchReadAttempt());
       throw error;
     }
     if (projection === null) await this.remover.remove(generation, claim, input.signal);

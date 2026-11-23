@@ -43,6 +43,13 @@
       "when": 1795366336918,
       "tag": "0005_search_generation_retention",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795423175951,
+      "tag": "0006_search_read_retry",
+      "breakpoints": true
     }
   ]
 }

@@ -63,6 +63,11 @@ persisted receipt even after the corresponding refresh has been applied.
 Meilisearch tasks complete independently of PostgreSQL. Success is confirmed before a caller
 can persist its position in a reconstruction.
 
+Failed authoritative reads defer the affected refresh locator or export position for 30 seconds.
+Ready work can progress independently, including across organizations and source services. A
+deferred position remains incomplete for promotion, and a concurrent position change or
+physical-write claim is preserved. Uncertain writes retain their original claims for recovery.
+
 The promotion transaction locks `search_rebuild_control`, verifies the persisted coverage, then
 retires the current generation and activates its successor in one commit. Broker and engine
 observations are collected outside that transaction. Refresh recording and roster checkpoint

@@ -37,8 +37,8 @@ export class DrizzleSearchParentReconciliation implements SearchParentReconcilia
   }
 
   /** Releases a parent before a physical write is attempted. */
-  public async release(claim: SearchRefreshClaim): Promise<void> {
-    return this.run((repository) => repository.release(claim));
+  public async release(claim: SearchRefreshClaim, retryAt: Date): Promise<void> {
+    return this.run((repository) => repository.release(claim, retryAt));
   }
 
   /** Settles the physically confirmed parent revision. */

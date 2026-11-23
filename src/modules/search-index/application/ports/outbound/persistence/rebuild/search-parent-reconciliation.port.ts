@@ -17,7 +17,7 @@ export interface SearchParentReconciliationPort {
   }): Promise<'advanced' | 'stale' | 'restarted'>;
 
   /** Releases this token after failure before any parent physical write. */
-  release(claim: SearchRefreshClaim): Promise<void>;
+  release(claim: SearchRefreshClaim, retryAt: Date): Promise<void>;
 
   /** Settles only the claim and revision confirmed by the physical parent write. */
   finish(
