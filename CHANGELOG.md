@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/Cadenway/cadenway-search-service/compare/v0.3.0...v0.4.0) (2026-11-23)
+
+
+### Features
+
+* **search:** connect the meilisearch index runtime ([#27](https://github.com/Cadenway/cadenway-search-service/issues/27)) ([f464150](https://github.com/Cadenway/cadenway-search-service/commit/f464150ff02138dcc6e8781f2bdbad0be3019613))
+
+
+### Bug Fixes
+
+* **search:** bound index access and prune stale generations ([#29](https://github.com/Cadenway/cadenway-search-service/issues/29)) ([75868c8](https://github.com/Cadenway/cadenway-search-service/commit/75868c8dcb0417df58a050c0bcd8fd44da9ce3c8))
+* **search:** protect rebuild progress across authority failures ([#30](https://github.com/Cadenway/cadenway-search-service/issues/30)) ([07e9b95](https://github.com/Cadenway/cadenway-search-service/commit/07e9b95b11a225efee45a45cf80eed884063dccd))
+
 ## [0.3.0](https://github.com/Cadenway/cadenway-search-service/compare/v0.2.0...v0.3.0) (2026-11-16)
 
 
