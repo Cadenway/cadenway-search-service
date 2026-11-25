@@ -205,6 +205,12 @@ function brokerIdentityChanged(
   baseline: SearchRebuildBrokerProgress,
   current: SearchRebuildBrokerProgress,
 ): boolean {
+  if (!current.advisoryLatch) return false;
+  if (
+    baseline.advisoryLatch?.createdAt !== current.advisoryLatch.createdAt ||
+    baseline.advisoryLatch.lastSequence !== current.advisoryLatch.lastSequence
+  )
+    return true;
   if (baseline.stream !== current.stream || baseline.createdAt !== current.createdAt) return true;
   if (baseline.consumers.length !== current.consumers.length) return true;
   const original = new Map(

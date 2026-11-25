@@ -8,6 +8,7 @@ import { PromoteSearchRebuild } from './promote-search-rebuild.use-case.js';
 
 const createdAt = '2026-11-20T13:05:00.100Z';
 const broker: SearchRebuildBrokerProgress = {
+  advisoryLatch: { createdAt, lastSequence: 0 },
   stream: 'EVENTS',
   createdAt: '2026-11-20T13:00:00.000001Z',
   firstSequence: 1,

@@ -16,7 +16,7 @@ export class JetStreamSearchBrokerProgressAdapter implements SearchBrokerProgres
   // #region Constructor
   /** Binds the kit clients and the exact Search consumer set. */
   public constructor(
-    private readonly connection: Pick<MessagingConnection, 'isConsumerAdvisoryStreamClear'>,
+    private readonly connection: Pick<MessagingConnection, 'consumerAdvisoryStreamState'>,
     private readonly consumers: Pick<EventConsumers, 'readProgress'>,
     private readonly handlerNames: readonly string[],
   ) {
@@ -27,14 +27,27 @@ export class JetStreamSearchBrokerProgressAdapter implements SearchBrokerProgres
   // #region Methods
   /** Returns no proof if the stream, consumer set or terminal advisory state is uncertain. */
   public async read(signal?: AbortSignal): Promise<SearchRebuildBrokerProgress | null> {
-    if (!(await this.advisoriesClear(signal))) return null;
+    const before = await this.advisoryState(signal);
+    if (before.state !== 'clear') return null;
     const progress = await this.consumers.readProgress(this.handlerNames, signal);
-    if (progress?.stream !== eventStream || !(await this.advisoriesClear(signal))) return null;
-    return progress;
+    const after = await this.advisoryState(signal);
+    if (
+      progress?.stream !== eventStream ||
+      after.state !== 'clear' ||
+      before.createdAt === null ||
+      before.lastSequence === null ||
+      before.createdAt !== after.createdAt ||
+      before.lastSequence !== after.lastSequence
+    )
+      return null;
+    return {
+      ...progress,
+      advisoryLatch: { createdAt: before.createdAt, lastSequence: before.lastSequence },
+    };
   }
 
-  private async advisoriesClear(signal?: AbortSignal): Promise<boolean> {
-    return this.connection.isConsumerAdvisoryStreamClear(
+  private async advisoryState(signal?: AbortSignal) {
+    return this.connection.consumerAdvisoryStreamState(
       advisoryStream,
       eventStream,
       this.durableNames,

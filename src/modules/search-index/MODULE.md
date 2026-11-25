@@ -56,7 +56,11 @@ persisted receipt even after the corresponding refresh has been applied.
   abandons the candidate only while that cursor still matches unclaimed work.
 - The promotion gate requires all authoritative exports to complete, a stable physical index and
   stream identity, the same caught-up durables, and no pending refreshes or unresolved terminal
-  delivery advisories. An exact-filter durable can be caught up before the global stream's last
+  delivery advisories. Clear latch observations at the start and end must have the same creation
+  time and last assigned sequence; the active generation retains that baseline and is rebuilt
+  after a confirmed change, including a purged advisory or a recreated latch. A legacy baseline
+  is rebuilt once a clear observation is available. Unknown observations do not certify or discard.
+  An exact-filter durable can be caught up before the global stream's last
   sequence when no event matching its filter occupies the remaining positions.
 
 ## Transactions
