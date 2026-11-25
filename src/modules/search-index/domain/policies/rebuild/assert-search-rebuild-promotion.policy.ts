@@ -46,6 +46,28 @@ export function assertSearchRebuildPromotion(
   assertBrokerProgress(start);
   assertBrokerProgress(current);
 
+  const startLatch = start.advisoryLatch;
+  const currentLatch = current.advisoryLatch;
+  if (
+    !currentLatch ||
+    !isCreationTimestamp(currentLatch.createdAt) ||
+    !isSequence(currentLatch.lastSequence)
+  ) {
+    throw new SearchRebuildPromotionError('The advisory latch observation is missing or invalid.');
+  }
+  if (
+    !startLatch ||
+    !isCreationTimestamp(startLatch.createdAt) ||
+    !isSequence(startLatch.lastSequence) ||
+    startLatch.createdAt !== currentLatch.createdAt ||
+    startLatch.lastSequence !== currentLatch.lastSequence
+  ) {
+    throw new SearchRebuildPromotionError(
+      'The advisory latch baseline changed or is missing.',
+      'invalidated',
+    );
+  }
+
   // Source data covers the prefix observed before the scans opened. Losing a later position can
   // hide a change the scans missed. Consumer positions never need to reach the stream-wide head.
   if (

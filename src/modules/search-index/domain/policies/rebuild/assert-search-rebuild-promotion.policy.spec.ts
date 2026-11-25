@@ -9,6 +9,7 @@ const createdAt = '2026-11-21T10:00:00.123456781Z';
 const replacedAt = '2026-11-21T10:00:00.123456782Z';
 
 const brokerAtStart: SearchRebuildBrokerProgress = {
+  advisoryLatch: { createdAt, lastSequence: 0 },
   stream: 'EVENTS',
   createdAt,
   firstSequence: 1,
@@ -113,6 +114,24 @@ describe('assertSearchRebuildPromotion', () => {
     }).not.toThrow();
   });
 
+  it('invalidates a legacy baseline without a latch observation', () => {
+    expect(() => {
+      assertSearchRebuildPromotion({
+        ...evidence,
+        brokerAtStart: { ...brokerAtStart, advisoryLatch: undefined },
+      });
+    }).toThrow(expect.objectContaining({ reason: 'invalidated' }));
+  });
+
+  it('waits when the final latch observation is unknown', () => {
+    expect(() => {
+      assertSearchRebuildPromotion({
+        ...evidence,
+        brokerBeforePromotion: { ...brokerBeforePromotion, advisoryLatch: undefined },
+      });
+    }).toThrow(expect.objectContaining({ reason: 'not-ready' }));
+  });
+
   it('refuses promotion without evidence', () => {
     expect(() => {
       assertSearchRebuildPromotion(undefined);
@@ -177,6 +196,11 @@ describe('assertSearchRebuildPromotion', () => {
   });
 
   it.each<[string, Partial<SearchRebuildBrokerProgress>]>([
+    ['an advisory was recorded and cleared', { advisoryLatch: { createdAt, lastSequence: 1 } }],
+    [
+      'the advisory latch was recreated',
+      { advisoryLatch: { createdAt: replacedAt, lastSequence: 0 } },
+    ],
     ['the event stream name changed', { stream: 'OTHER_EVENTS' }],
     ['the event stream was recreated', { createdAt: replacedAt }],
     ['the retention floor crossed the start of the scan', { firstSequence: 52 }],

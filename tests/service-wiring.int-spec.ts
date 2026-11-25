@@ -720,6 +720,7 @@ describe('search-service wiring', () => {
     const activeId = '01938f6e-0000-7000-8000-000000000062';
     const engineCreatedAt = '2026-11-20T13:05:00.100Z';
     const broker = {
+      advisoryLatch: { createdAt: engineCreatedAt, lastSequence: 0 },
       stream: 'EVENTS',
       createdAt: '2026-11-20T13:00:00.000001Z',
       firstSequence: 1,

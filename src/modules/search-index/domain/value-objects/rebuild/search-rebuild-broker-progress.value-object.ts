@@ -1,6 +1,9 @@
 /** An observation of the event stream and the configured rebuild durables. */
 export interface SearchRebuildBrokerProgress {
   // #region Properties
+  /** Clear advisory latch identity and last assigned sequence; absent on legacy rows. */
+  readonly advisoryLatch?: { readonly createdAt: string; readonly lastSequence: number };
+
   /** Name of the event stream. */
   readonly stream: string;
 

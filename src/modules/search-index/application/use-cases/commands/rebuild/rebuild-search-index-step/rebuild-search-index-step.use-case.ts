@@ -205,6 +205,13 @@ function brokerIdentityChanged(
   baseline: SearchRebuildBrokerProgress,
   current: SearchRebuildBrokerProgress,
 ): boolean {
+  // A current sample without a latch observation compares the stream and consumers only.
+  if (
+    current.advisoryLatch &&
+    (baseline.advisoryLatch?.createdAt !== current.advisoryLatch.createdAt ||
+      baseline.advisoryLatch.lastSequence !== current.advisoryLatch.lastSequence)
+  )
+    return true;
   if (baseline.stream !== current.stream || baseline.createdAt !== current.createdAt) return true;
   if (baseline.consumers.length !== current.consumers.length) return true;
   const original = new Map(

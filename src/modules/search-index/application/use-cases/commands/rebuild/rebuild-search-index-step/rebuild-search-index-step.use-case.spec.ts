@@ -6,6 +6,7 @@ import type { SearchRebuildRuntime } from '../../../../models/rebuild/search-reb
 import { RebuildSearchIndexStep } from './rebuild-search-index-step.use-case.js';
 
 const broker = {
+  advisoryLatch: { createdAt: '2026-11-20T00:00:00Z', lastSequence: 0 },
   stream: 'EVENTS',
   createdAt: '2026-11-20T00:00:00Z',
   firstSequence: 1,
@@ -99,6 +100,27 @@ describe('RebuildSearchIndexStep', () => {
       brokerAtStart: changed,
     });
     expect(progress.read).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['a purged advisory', { createdAt: '2026-11-20T00:00:00Z', lastSequence: 1 }],
+    ['a recreated latch', { createdAt: '2026-11-21T00:00:00Z', lastSequence: 0 }],
+  ])('rebuilds after %s', async (_reason, advisoryLatch) => {
+    const { command, progress, register } = setup({ active: { ...generation, status: 'active' } });
+    progress.read.mockResolvedValueOnce({ ...broker, advisoryLatch });
+    await expect(command.execute({ ...input, checkActiveBroker: true })).resolves.toBe('created');
+    expect(register.execute).toHaveBeenCalledOnce();
+  });
+
+  it('rebuilds a legacy active generation after a clear observation', async () => {
+    const active = {
+      ...generation,
+      status: 'active' as const,
+      brokerAtStart: { ...broker, advisoryLatch: undefined },
+    };
+    const { command, register } = setup({ active });
+    await expect(command.execute({ ...input, checkActiveBroker: true })).resolves.toBe('created');
+    expect(register.execute).toHaveBeenCalledOnce();
   });
 
   it('detects a replaced exact durable and ignores ordinary retained sequence advancement', async () => {
